@@ -15,7 +15,10 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.qfind.app"
+      "bundleIdentifier": "com.qfind.app",
+      "config": {
+        "googleMapsApiKey": "AIzaSyD8gXnfd_dXypJthMh_9PI3OUDaD1ndNPQ"
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -23,7 +26,12 @@
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.qfind.app"
+      "package": "com.qfind.app",
+      "config": {
+        "googleMaps": {
+          "apiKey": "AIzaSyD8gXnfd_dXypJthMh_9PI3OUDaD1ndNPQ"
+        }
+      }
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -33,3 +41,4 @@
     ]
   }
 }
+
