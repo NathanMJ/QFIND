@@ -17,13 +17,6 @@ const schema = a.schema({
 
 export type Schema = ClientSchema<typeof schema>;
 
-export const data = defineData({
-  schema,
-  authorizationModes: {
-    defaultAuthorizationMode: 'identityPool',
-  },
-});
-
 export const storage = defineStorage({
   name: 'qfind-amplify-data-bucket',
   access: (allow) => ({
