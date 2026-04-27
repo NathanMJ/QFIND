@@ -14,10 +14,12 @@ import {
     ActivityIndicator,
     Image,
     RefreshControl,
+    Keyboard,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { LinearGradient } from 'expo-linear-gradient';
 import * as Location from 'expo-location';
+import { supabase } from '../lib/supabaseClient';
+import { firstProductImageSource, parseProductImageUrls } from '../lib/productImages';
 
 // Logo Imports
 const LogoApple = require('../../assets/logo-apple.png');
@@ -26,7 +28,8 @@ import FCShop from '../components/FCShop';
 import FCProduct from '../components/FCProduct';
 import FCSwitchMap from '../components/FCSwitchMap';
 import FCFilterBar from '../components/FCFilterBar';
-import { getMenuData } from '../../amplify/functions/getMenuData';
+import BrowseScreenSkeleton from '../components/BrowseScreenSkeleton';
+import { useSettings } from '../context/SettingsContext';
 
 // react-native-maps only works on native (iOS/Android), not on web
 let MapView = null;
@@ -38,225 +41,441 @@ if (Platform.OS !== 'web') {
 
 const { width } = Dimensions.get('window');
 
+/** Fallback si GPS refusé / timeout / indispo (Ashkelon seed). */
+const DEFAULT_COORDS = { latitude: 31.6688, longitude: 34.5718 };
 
+/** Cap blocking GPS waits (Android can hang 15–30s without a fix). */
+const GPS_FIX_TIMEOUT_MS = 4000;
 
-const POPULAR = [
-    { id: '1', title: 'Corner Bakery', category: 'Restaurants', rating: 4.8, reviews: 234 },
-    { id: '2', title: 'Central Café', category: 'Cafes', rating: 4.6, reviews: 189 },
-    { id: '3', title: 'TechStore Pro', category: 'Shopping', rating: 4.5, reviews: 312 },
-    { id: '4', title: 'Adventure Park', category: 'Leisure', rating: 4.9, reviews: 567 },
+function distanceMeters(a, b) {
+    if (!a || !b) return Infinity;
+    const R = 6371000; // meters
+    const toRad = (deg) => (deg * Math.PI) / 180;
+
+    const dLat = toRad(b.latitude - a.latitude);
+    const dLng = toRad(b.longitude - a.longitude);
+    const lat1 = toRad(a.latitude);
+    const lat2 = toRad(b.latitude);
+
+    const s =
+        Math.sin(dLat / 2) ** 2 +
+        Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+
+    return 2 * R * Math.asin(Math.sqrt(s));
+}
+
+function parsePriceToNumber(value) {
+    if (value == null) return null;
+    if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+    const s = String(value).trim();
+    if (!s) return null;
+    // Handles "123", "123.45", "123,45", "123 EUR", "₪123", etc.
+    const cleaned = s.replace(',', '.').match(/-?\d+(\.\d+)?/g)?.[0];
+    if (!cleaned) return null;
+    const n = Number(cleaned);
+    return Number.isFinite(n) ? n : null;
+}
+
+const PRODUCT_IMAGES = [
+    require('../../assets/iphone.jpeg'),
+    require('../../assets/sneakers.jpeg'),
 ];
-
-const NEARBY_SHOPS = [
-    {
-        id: '1',
-        name: 'Mega Sport',
-        title: 'Mega Sport',
-        category: 'Shopping',
-        adress: 'Shay Agnon St, Ashkelon',
-        latitude: 31.662121,
-        longitude: 34.554262,
-        description: 'Sports & Fitness Equipment',
-        rating: 4.5,
-        reviews: 187,
-        distance: '150 m',
-        phone: '+972-8-672-1234',
-        hours: '09:00 - 21:00',
-        isOpen: true,
-        logoIcon: 'fitness',
-        logoColor: '#FF6B6B',
-        logo: LogoApple,
-    },
-    {
-        id: '2',
-        name: 'Fox',
-        title: 'Fox',
-        category: 'Shopping',
-        adress: 'Shay Agnon St, Ashkelon',
-        latitude: 31.661033,
-        longitude: 34.555941,
-        description: 'Clothing & Fashion',
-        rating: 4.3,
-        reviews: 312,
-        distance: '200 m',
-        phone: '+972-8-672-5678',
-        hours: '09:30 - 22:00',
-        isOpen: true,
-        logoIcon: 'shirt',
-        logoColor: '#4ECDC4',
-        logo: LogoApple,
-    },
-    {
-        id: '3',
-        name: 'Mania Jeans',
-        title: 'Mania Jeans',
-        category: 'Shopping',
-        adress: 'Shay Agnon St, Ashkelon',
-        latitude: 31.6625,
-        longitude: 34.5548,
-        description: 'Jeans & Casual Wear',
-        rating: 4.2,
-        reviews: 98,
-        distance: '180 m',
-        phone: '+972-8-672-9012',
-        hours: '10:00 - 20:00',
-        isOpen: false,
-        logoIcon: 'body',
-        logoColor: '#45B7D1',
-        logo: LogoApple,
-    },
-    {
-        id: '4',
-        name: 'Studio Pasha',
-        title: 'Studio Pasha',
-        category: 'Shopping',
-        adress: 'Shay Agnon St, Ashkelon',
-        latitude: 31.6618,
-        longitude: 34.5555,
-        description: "Women's Fashion",
-        rating: 4.6,
-        reviews: 145,
-        distance: '250 m',
-        phone: '+972-8-672-3456',
-        hours: '09:00 - 21:30',
-        isOpen: true,
-        logoIcon: 'woman',
-        logoColor: '#F78FB3',
-        logo: LogoApple,
-    },
-    {
-        id: '5',
-        name: 'Lee Cooper Kids',
-        title: 'Lee Cooper Kids',
-        category: 'Shopping',
-        adress: 'Shay Agnon St, Ashkelon',
-        latitude: 31.6630,
-        longitude: 34.5540,
-        description: 'Kids Fashion',
-        rating: 4.4,
-        reviews: 76,
-        distance: '300 m',
-        phone: '+972-8-672-7890',
-        hours: '10:00 - 20:00',
-        isOpen: false,
-        logoIcon: 'happy',
-        logoColor: '#FFD93D',
-        logo: LogoApple,
-    },
-    {
-        id: '6',
-        name: "Yitzhak's Grocery",
-        title: "Yitzhak's Grocery",
-        category: 'Restaurants',
-        adress: 'Shay Agnon St 5, Ashkelon',
-        latitude: 31.6622,
-        longitude: 34.5537,
-        description: 'Fine Grocery & Local Products',
-        rating: 4.8,
-        reviews: 54,
-        distance: '120 m',
-        phone: '+972-8-672-1111',
-        hours: '08:00 - 20:00',
-        isOpen: true,
-        logoIcon: 'cart',
-        logoColor: '#A55EEA',
-        logo: LogoApple,
-    },
-];
-
 
 export default function BrowseScreen() {
     const navigation = useNavigation();
+    const { formatDistance } = useSettings();
     const [searchQuery, setSearchQuery] = useState('');
+    const [appliedSearchQuery, setAppliedSearchQuery] = useState('');
     const [isSearchOpen, setIsSearchOpen] = useState(false);
     const [viewMode, setViewMode] = useState('list');
     const [userLocation, setUserLocation] = useState(null);
     const [locationLoading, setLocationLoading] = useState(false);
+    const [nearbyLoading, setNearbyLoading] = useState(true);
     const [selectedShop, setSelectedShop] = useState(null);
-    const [shops, setShops] = useState(NEARBY_SHOPS);
-    const [products, setProducts] = useState([]);
+    const [shops, setShops] = useState([]);
+    const [productsLeft, setProductsLeft] = useState([]);
+    const [productsRight, setProductsRight] = useState([]);
+    const [productsOffset, setProductsOffset] = useState(0);
+    const [productsHasMore, setProductsHasMore] = useState(true);
+    const [productsLoadingMore, setProductsLoadingMore] = useState(false);
+    const [refreshPromptVisible, setRefreshPromptVisible] = useState(false);
+    const [pendingCoords, setPendingCoords] = useState(null);
     const [filters, setFilters] = useState({
         categories: [],
         distance: null,
         priceMin: null,
         priceMax: null,
         promoOnly: false,
-        showMode: 'all',
     });
     const [refreshing, setRefreshing] = useState(false);
     const searchAnim = useRef(new Animated.Value(0)).current;
     const panelAnim = useRef(new Animated.Value(0)).current;
     const searchInputRef = useRef(null);
     const locationSubRef = useRef(null);
+    const listLocationSubRef = useRef(null);
+    const lastFetchCoordsRef = useRef(null);
+    const dismissedForCoordsRef = useRef(null);
+    const productColumnByIdRef = useRef(new Map());
+    const measuredHeightsByProductIdRef = useRef(new Map());
+    const columnHeightsRef = useRef({ left: 0, right: 0 });
+    const productsLoadingMoreRef = useRef(false);
+    const productsHasMoreRef = useRef(true);
 
-    // Fetch data from getMenuData and map to component-compatible format
-    const fetchMenuData = useCallback(async () => {
+    const PAGE_SIZE = 8; // test value
+
+    /** Fast path: last fix, then a single low-accuracy GPS read (one Supabase RPC after this). */
+    const resolveBrowseCoords = useCallback(async () => {
         try {
-            const coords = userLocation
-                ? { latitude: userLocation.latitude, longitude: userLocation.longitude }
-                : { latitude: 31.662, longitude: 34.554 };
+            if (Platform.OS !== 'web') {
+                const enabled = await Location.hasServicesEnabledAsync();
+                if (!enabled) return DEFAULT_COORDS;
+            }
 
-            const data = await getMenuData(coords);
+            const { status } = await Location.requestForegroundPermissionsAsync();
+            if (status !== 'granted') return DEFAULT_COORDS;
 
-            // Map shops to the format expected by FCShop
-            const mappedShops = data.nearbyShops.map((s) => ({
-                id: s.id,
-                name: s.name,
-                title: s.name,
-                category: s.category,
-                adress: s.address,
-                latitude: s.latitude,
-                longitude: s.longitude,
-                description: s.description,
-                rating: s.rating,
-                reviews: s.reviews,
-                distance: s.distance,
-                phone: s.phone,
-                openTime: s.openTime,
-                closeTime: s.closeTime,
-                hours: `${s.openTime} - ${s.closeTime}`,
-                isOpen: s.isOpen,
-                logo: LogoApple,
-                logoUrl: s.logoUrl,
-                coverUrl: s.coverUrl,
-            }));
+            const last = await Location.getLastKnownPositionAsync({
+                maxAge: 5 * 60 * 1000,
+            });
+            if (last?.coords) {
+                return {
+                    latitude: last.coords.latitude,
+                    longitude: last.coords.longitude,
+                };
+            }
 
-            // Map products to the format expected by FCProduct
-            const productImages = [
-                require('../../assets/iphone.jpeg'),
-                require('../../assets/sneakers.jpeg'),
-            ];
-            const mappedProducts = data.nearbyProducts.map((p, i) => ({
-                name: p.name,
-                rating: p.rating,
-                price: p.discountPrice ? `${p.discountPrice} ${p.currency}` : `${p.price} ${p.currency}`,
-                old_price: p.discountPrice ? `${p.price} ${p.currency}` : null,
-                store_infos: p.shopName,
-                store_address: p.shopAddress,
-                img: productImages[i % 2],
-                distance: p.distance,
-                inStock: p.inStock,
-                description: p.description || '',
-            }));
+            const pos = await Promise.race([
+                Location.getCurrentPositionAsync({
+                    accuracy: Location.Accuracy.Low,
+                }),
+                new Promise((_, reject) => {
+                    setTimeout(() => reject(new Error('location_timeout')), GPS_FIX_TIMEOUT_MS);
+                }),
+            ]).catch(() => null);
 
-            setShops(mappedShops);
-            setProducts(mappedProducts);
-        } catch (error) {
-            console.error('[BrowseScreen] Failed to fetch menu data:', error);
+            if (!pos?.coords) return DEFAULT_COORDS;
+
+            return {
+                latitude: pos.coords.latitude,
+                longitude: pos.coords.longitude,
+            };
+        } catch {
+            return DEFAULT_COORDS;
         }
-    }, [userLocation]);
-
-    // Load data on mount
-    useEffect(() => {
-        fetchMenuData();
     }, []);
+
+    const applyNearbyPayload = useCallback((data) => {
+        const nearbyShops = data?.nearbyShops ?? [];
+
+        const mappedShops = nearbyShops.map((s) => ({
+            id: s.id,
+            name: s.name,
+            title: s.name,
+            category: s.category || 'Shop',
+            adress: s.address || '',
+            latitude: s.latitude,
+            longitude: s.longitude,
+            description: '',
+            rating: 4.5,
+            reviews: 0,
+            distanceM: s.distance_m != null ? Number(s.distance_m) : null,
+            distance: formatDistance(s.distance_m),
+            phone: s.phone || '',
+            openTime: s.open_time || null,
+            closeTime: s.close_time || null,
+            hours: s.open_time && s.close_time ? `${s.open_time} - ${s.close_time}` : '',
+                isOpen: true,
+                logo: s.logo_url ? { uri: s.logo_url } : LogoApple,
+                logoUrl: s.logo_url || null,
+                coverUrl: s.cover_url || null,
+            }));
+
+        setShops(mappedShops);
+    }, [formatDistance]);
+
+    const mapNearbyProducts = useCallback((nearbyProducts, shopsById) => {
+        const arr = nearbyProducts ?? [];
+        return arr.map((p, i) => {
+            const shop = shopsById?.get?.(p.shop_id);
+            const price = p.discount_price ?? p.price;
+            const oldPrice = p.discount_price ? p.price : null;
+            const currency = p.currency || 'EUR';
+            const imageUrls = parseProductImageUrls(p);
+            const storeName = p.shop_name ?? shop?.name ?? '';
+            const storeAddress = p.shop_address ?? shop?.address ?? '';
+
+            return {
+                id: p.id,
+                shop_id: p.shop_id,
+                section_id: p.section_id ?? null,
+                name: p.name,
+                rating: 4.5,
+                price: price != null ? `${price} ${currency}` : '',
+                priceValue: price != null ? Number(price) : null,
+                old_price: oldPrice != null ? `${oldPrice} ${currency}` : null,
+                oldPriceValue: oldPrice != null ? Number(oldPrice) : null,
+                store_infos: storeName,
+                store_address: storeAddress,
+                currency,
+                image_urls: imageUrls,
+                img: firstProductImageSource(
+                    imageUrls,
+                    PRODUCT_IMAGES[i % PRODUCT_IMAGES.length]
+                ),
+                distanceM: p.distance_m != null ? Number(p.distance_m) : null,
+                distance: formatDistance(p.distance_m),
+                inStock: p.in_stock ?? true,
+                description: p.description || '',
+            };
+        });
+    }, [formatDistance]);
+
+    const resetProductsMasonry = useCallback(() => {
+        setProductsLeft([]);
+        setProductsRight([]);
+        setProductsOffset(0);
+        setProductsHasMore(true);
+        setProductsLoadingMore(false);
+        productsLoadingMoreRef.current = false;
+        productsHasMoreRef.current = true;
+        productColumnByIdRef.current = new Map();
+        measuredHeightsByProductIdRef.current = new Map();
+        columnHeightsRef.current = { left: 0, right: 0 };
+    }, []);
+
+    const assignProductsToColumns = useCallback((newProducts) => {
+        const leftNext = [];
+        const rightNext = [];
+
+        let leftH = columnHeightsRef.current.left || 0;
+        let rightH = columnHeightsRef.current.right || 0;
+        const defaultEstimateH = 320;
+
+        for (const p of newProducts) {
+            const id = p?.id;
+            if (!id) continue;
+            if (productColumnByIdRef.current.has(id)) continue;
+
+            const estH = measuredHeightsByProductIdRef.current.get(id) ?? defaultEstimateH;
+            const side = leftH <= rightH ? 'left' : 'right';
+
+            productColumnByIdRef.current.set(id, side);
+            if (side === 'left') {
+                leftNext.push(p);
+                leftH += estH;
+            } else {
+                rightNext.push(p);
+                rightH += estH;
+            }
+        }
+
+        columnHeightsRef.current = { left: leftH, right: rightH };
+
+        if (leftNext.length) setProductsLeft((prev) => [...prev, ...leftNext]);
+        if (rightNext.length) setProductsRight((prev) => [...prev, ...rightNext]);
+    }, []);
+
+    const onProductMeasured = useCallback((productId, height) => {
+        if (!productId || !Number.isFinite(height) || height <= 0) return;
+        const side = productColumnByIdRef.current.get(productId);
+        if (!side) return;
+
+        const prevH = measuredHeightsByProductIdRef.current.get(productId);
+        if (prevH === height) return;
+        measuredHeightsByProductIdRef.current.set(productId, height);
+
+        if (prevH != null) {
+            columnHeightsRef.current = {
+                ...columnHeightsRef.current,
+                [side]: (columnHeightsRef.current[side] || 0) - prevH + height,
+            };
+        } else {
+            columnHeightsRef.current = {
+                ...columnHeightsRef.current,
+                [side]: (columnHeightsRef.current[side] || 0) + height,
+            };
+        }
+    }, []);
+
+    const fetchNearbyWithCoords = useCallback(async (coords) => {
+        const { data, error } = await supabase.rpc('get_nearby', {
+            lat: coords.latitude,
+            lng: coords.longitude,
+            shops_limit: 12,
+            products_limit: 0,
+        });
+        if (error) throw error;
+        applyNearbyPayload(data);
+    }, [applyNearbyPayload]);
+
+    const fetchNearbyProductsPage = useCallback(async ({ coords, offset }) => {
+        const { data, error } = await supabase.rpc('get_nearby_products', {
+            lat: coords.latitude,
+            lng: coords.longitude,
+            limit: PAGE_SIZE,
+            offset,
+            per_shop_max: 3,
+        });
+        if (error) throw error;
+        return data;
+    }, []);
+
+    const loadInitialProducts = useCallback(async (coords) => {
+        resetProductsMasonry();
+        const payload = await fetchNearbyProductsPage({ coords, offset: 0 });
+        const productsRaw = payload?.products ?? [];
+        const mapped = mapNearbyProducts(productsRaw);
+        assignProductsToColumns(mapped);
+        setProductsOffset(mapped.length);
+        const hasMore = payload?.has_more !== false;
+        setProductsHasMore(Boolean(hasMore));
+        productsHasMoreRef.current = Boolean(hasMore);
+    }, [assignProductsToColumns, fetchNearbyProductsPage, mapNearbyProducts, resetProductsMasonry]);
+
+    const loadMoreProducts = useCallback(async () => {
+        const coords = lastFetchCoordsRef.current;
+        if (!coords) return;
+        if (productsLoadingMoreRef.current) return;
+        if (!productsHasMoreRef.current) return;
+
+        productsLoadingMoreRef.current = true;
+        setProductsLoadingMore(true);
+        try {
+            const offset = productsOffset;
+            const payload = await fetchNearbyProductsPage({ coords, offset });
+            const productsRaw = payload?.products ?? [];
+            const mapped = mapNearbyProducts(productsRaw);
+            assignProductsToColumns(mapped);
+
+            const nextOffset = offset + mapped.length;
+            setProductsOffset(nextOffset);
+            const hasMore = payload?.has_more !== false && mapped.length > 0;
+            setProductsHasMore(Boolean(hasMore));
+            productsHasMoreRef.current = Boolean(hasMore);
+        } catch (e) {
+            console.error('[BrowseScreen] loadMoreProducts failed:', e);
+        } finally {
+            productsLoadingMoreRef.current = false;
+            setProductsLoadingMore(false);
+        }
+    }, [assignProductsToColumns, fetchNearbyProductsPage, mapNearbyProducts, productsOffset]);
+
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            setNearbyLoading(true);
+            try {
+                const coords = await resolveBrowseCoords();
+                if (cancelled) return;
+                await fetchNearbyWithCoords(coords);
+                lastFetchCoordsRef.current = coords;
+                dismissedForCoordsRef.current = null;
+                setPendingCoords(null);
+                setRefreshPromptVisible(false);
+                await loadInitialProducts(coords);
+            } catch (err) {
+                console.error('[BrowseScreen] Initial nearby fetch failed:', err);
+                if (!cancelled) {
+                    setShops([]);
+                    resetProductsMasonry();
+                }
+            } finally {
+                if (!cancelled) setNearbyLoading(false);
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [resolveBrowseCoords, fetchNearbyWithCoords, loadInitialProducts, resetProductsMasonry]);
 
     // Pull-to-refresh
     const onRefresh = useCallback(async () => {
         setRefreshing(true);
-        await fetchMenuData();
-        setRefreshing(false);
-    }, [fetchMenuData]);
+        try {
+            const coords =
+                userLocation != null
+                    ? { latitude: userLocation.latitude, longitude: userLocation.longitude }
+                    : await resolveBrowseCoords();
+            await fetchNearbyWithCoords(coords);
+            lastFetchCoordsRef.current = coords;
+            dismissedForCoordsRef.current = null;
+            setPendingCoords(null);
+            setRefreshPromptVisible(false);
+            await loadInitialProducts(coords);
+        } catch (err) {
+            console.error('[BrowseScreen] Refresh failed:', err);
+        } finally {
+            setRefreshing(false);
+        }
+    }, [userLocation, resolveBrowseCoords, fetchNearbyWithCoords, loadInitialProducts]);
+
+    // Lightweight location watcher (list mode): prompt refresh when moved > 10m from last fetch coords
+    useEffect(() => {
+        let cancelled = false;
+
+        (async () => {
+            try {
+                if (Platform.OS !== 'web') {
+                    const enabled = await Location.hasServicesEnabledAsync();
+                    if (!enabled) return;
+                }
+
+                const { status } = await Location.requestForegroundPermissionsAsync();
+                if (status !== 'granted') return;
+
+                // Avoid duplicate watchers
+                if (listLocationSubRef.current) {
+                    listLocationSubRef.current.remove();
+                    listLocationSubRef.current = null;
+                }
+
+                listLocationSubRef.current = await Location.watchPositionAsync(
+                    {
+                        accuracy: Location.Accuracy.Balanced,
+                        timeInterval: 8000,
+                        distanceInterval: 10,
+                    },
+                    (location) => {
+                        if (cancelled) return;
+                        const c = location?.coords;
+                        if (!c) return;
+
+                        const next = { latitude: c.latitude, longitude: c.longitude };
+
+                        // Filter noisy updates: if accuracy too poor, ignore (10m threshold is very sensitive)
+                        const acc = c.accuracy;
+                        if (acc != null && Number(acc) > 30) return;
+
+                        const base = lastFetchCoordsRef.current;
+                        if (!base) return;
+
+                        const movedM = distanceMeters(base, next);
+                        if (!(movedM > 10)) return;
+
+                        // Anti-spam: if user dismissed for a nearby coords, don't re-prompt
+                        const dismissed = dismissedForCoordsRef.current;
+                        if (dismissed) {
+                            const d = distanceMeters(dismissed, next);
+                            if (d < 10) return;
+                        }
+
+                        setPendingCoords(next);
+                        setRefreshPromptVisible(true);
+                    }
+                );
+            } catch (e) {
+                console.warn('[BrowseScreen] list location watcher failed:', e);
+            }
+        })();
+
+        return () => {
+            cancelled = true;
+            if (listLocationSubRef.current) {
+                listLocationSubRef.current.remove();
+                listLocationSubRef.current = null;
+            }
+        };
+    }, []);
 
     const openShopPanel = (shop) => {
         setSelectedShop(shop);
@@ -299,6 +518,11 @@ export default function BrowseScreen() {
                 }
 
                 // Track position in real-time
+                if (locationSubRef.current) {
+                    locationSubRef.current.remove();
+                    locationSubRef.current = null;
+                }
+
                 locationSubRef.current = await Location.watchPositionAsync(
                     {
                         accuracy: Location.Accuracy.BestForNavigation,
@@ -338,6 +562,7 @@ export default function BrowseScreen() {
             }).start(() => {
                 setIsSearchOpen(false);
                 setSearchQuery('');
+                setAppliedSearchQuery('');
             });
         } else {
             setIsSearchOpen(true);
@@ -351,6 +576,13 @@ export default function BrowseScreen() {
             });
         }
     };
+
+    const applySearch = useCallback(() => {
+        const next = searchQuery;
+        setAppliedSearchQuery(next);
+        Keyboard.dismiss();
+        // Keep dropdown open so user can quickly refine; list/map updates after commit
+    }, [searchQuery]);
 
     const toggleCategoryFilter = (category) => {
         const current = filters.categories || [];
@@ -372,6 +604,79 @@ export default function BrowseScreen() {
         extrapolate: 'clamp',
     });
 
+    const appliedCategoryNames = (filters.categories || [])
+        .map((c) => c?.name)
+        .filter(Boolean);
+
+    const categoryFilterActive = appliedCategoryNames.length > 0;
+    const categorySet = new Set(appliedCategoryNames);
+
+    const q = appliedSearchQuery.trim().toLowerCase();
+
+    const maxDistanceM = filters.distance != null ? Number(filters.distance) : null;
+    const priceMin = filters.priceMin != null ? Number(filters.priceMin) : null;
+    const priceMax = filters.priceMax != null ? Number(filters.priceMax) : null;
+    const promoOnly = filters.promoOnly === true;
+
+    const filteredShops = (categoryFilterActive ? shops.filter((s) => categorySet.has(s.category)) : shops)
+        .filter((s) => {
+            if (maxDistanceM == null) return true;
+            return s?.distanceM != null && Number(s.distanceM) <= maxDistanceM;
+        })
+        .filter((s) => {
+            if (!q) return true;
+            const hay = `${s?.name || s?.title || ''} ${s?.adress || s?.address || ''} ${s?.category || ''}`.toLowerCase();
+            return hay.includes(q);
+        });
+
+    const shopById = new Map(shops.map((s) => [s.id, s]));
+    const productsAll = [...productsLeft, ...productsRight];
+    const filteredProducts = (categoryFilterActive
+        ? productsAll.filter((p) => {
+            const shop = shopById.get(p.shop_id);
+            return shop?.category && categorySet.has(shop.category);
+        })
+        : productsAll
+    )
+        .filter((p) => {
+            if (maxDistanceM == null) return true;
+            return p?.distanceM != null && Number(p.distanceM) <= maxDistanceM;
+        })
+        .filter((p) => {
+            const pv = p?.priceValue ?? parsePriceToNumber(p?.price);
+            if (pv == null) return true; // don't hide items with unknown price
+            if (priceMin != null && pv < priceMin) return false;
+            if (priceMax != null && pv > priceMax) return false;
+            return true;
+        })
+        .filter((p) => {
+            if (!promoOnly) return true;
+            // Promotion = has old price / discount
+            return p?.oldPriceValue != null || parsePriceToNumber(p?.old_price) != null;
+        })
+        .filter((p) => {
+        if (!q) return true;
+        const hay = `${p?.name || ''} ${p?.store_infos || ''} ${p?.store_address || ''}`.toLowerCase();
+        return hay.includes(q);
+    });
+
+    const filteredProductsIdSet = new Set(filteredProducts.map((p) => p.id));
+    const filteredLeft = productsLeft.filter((p) => filteredProductsIdSet.has(p.id));
+    const filteredRight = productsRight.filter((p) => filteredProductsIdSet.has(p.id));
+
+    const handleSeeAllShopsNearYou = useCallback(async () => {
+        try {
+            const coords =
+                userLocation != null
+                    ? { latitude: userLocation.latitude, longitude: userLocation.longitude }
+                    : await resolveBrowseCoords();
+            navigation.navigate('ShopsListScreen', { coords, filters, searchQuery: appliedSearchQuery });
+        } catch (err) {
+            console.error('[BrowseScreen] See all shops failed:', err);
+            navigation.navigate('ShopsListScreen');
+        }
+    }, [appliedSearchQuery, filters, navigation, resolveBrowseCoords, userLocation]);
+
     return (
         <View style={styles.container}>
             <StatusBar barStyle="dark-content" />
@@ -389,6 +694,8 @@ export default function BrowseScreen() {
                     height: 42,
                     justifyContent: 'center',
                     alignItems: 'center',
+                    borderWidth: 1.5,
+                    borderColor: 'rgba(255,255,255,0.9)',
                     shadowColor: '#000',
                     shadowOffset: { width: 0, height: 2 },
                     shadowOpacity: 0.3,
@@ -449,6 +756,7 @@ export default function BrowseScreen() {
                         placeholder="Search..."
                         value={searchQuery}
                         onChangeText={setSearchQuery}
+                        onSubmitEditing={applySearch}
                         style={{
                             flex: 1,
                             fontSize: 16,
@@ -457,6 +765,22 @@ export default function BrowseScreen() {
                             outlineStyle: 'none',
                         }}
                     />
+                    <TouchableOpacity
+                        activeOpacity={0.85}
+                        onPress={applySearch}
+                        style={{
+                            marginLeft: 10,
+                            backgroundColor: '#2d253b',
+                            paddingHorizontal: 12,
+                            paddingVertical: 8,
+                            borderRadius: 10,
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            gap: 6,
+                        }}
+                    >
+                        <Ionicons name="checkmark" size={18} color="#fff" />
+                    </TouchableOpacity>
                 </View>
             </Animated.View>
 
@@ -465,6 +789,16 @@ export default function BrowseScreen() {
                     style={styles.scrollView}
                     contentContainerStyle={styles.scrollContent}
                     showsVerticalScrollIndicator={false}
+                    onScroll={({ nativeEvent }) => {
+                        const { layoutMeasurement, contentOffset, contentSize } = nativeEvent || {};
+                        if (!layoutMeasurement || !contentOffset || !contentSize) return;
+                        const distanceToBottom =
+                            contentSize.height - (layoutMeasurement.height + contentOffset.y);
+                        if (distanceToBottom < 350) {
+                            loadMoreProducts();
+                        }
+                    }}
+                    scrollEventThrottle={180}
                     refreshControl={
                         <RefreshControl
                             refreshing={refreshing}
@@ -475,59 +809,90 @@ export default function BrowseScreen() {
                         />
                     }
                 >
+                    {nearbyLoading ? (
+                        <BrowseScreenSkeleton />
+                    ) : (
+                        <>
+                            {filteredShops.length > 0 && (
+                                <View style={styles.containerSection}>
+                                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                                        <Text style={styles.sectionTitle}>Shops near you</Text>
+                                        <TouchableOpacity
+                                            onPress={handleSeeAllShopsNearYou}
+                                            style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end' }}
+                                        >
+                                            <Text style={{ textAlign: 'right', fontSize: 16, fontWeight: 'bold' }}>See all </Text>
+                                            <Ionicons name="chevron-forward-outline" size={24} color="black" />
+                                        </TouchableOpacity>
+                                    </View>
 
+                                    <View style={{ position: 'relative' }}>
+                                        <ScrollView
+                                            horizontal
+                                            showsHorizontalScrollIndicator={false}
+                                            contentContainerStyle={{ gap: 3 }}
+                                        >
+                                            {filteredShops.map((shop) => (
+                                                <FCShop key={shop.id} shop={shop} />
+                                            ))}
+                                        </ScrollView>
 
-                    <View style={styles.containerSection}>
-                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-                            <Text style={styles.sectionTitle}>Shops near you</Text>
-                            <TouchableOpacity
-                                onPress={() => navigation.navigate('ShopsListScreen')}
-                                style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end' }}
-                            >
-                                <Text style={{ textAlign: 'right', fontSize: 16, fontWeight: 'bold' }}>See all </Text>
-                                <Ionicons name="chevron-forward-outline" size={24} color="black" />
-                            </TouchableOpacity>
-                        </View>
+                                    </View>
+                                </View>
+                            )}
 
-                        <View style={{ position: 'relative' }}>
-                            <ScrollView
-                                horizontal
-                                showsHorizontalScrollIndicator={false}
-                                contentContainerStyle={{ gap: 3 }}
-                            >
-                                {shops.map((shop) => (
-                                    <FCShop key={shop.id} shop={shop} />
-                                ))}
-                                <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}>
-                                    <Text>More</Text>
-                                    <Ionicons name="chevron-forward-outline" size={24} color="black" />
-                                </TouchableOpacity>
-                            </ScrollView>
+                            {filteredProducts.length > 0 && (
+                                <View style={styles.containerSection}>
+                                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                                        <Text style={styles.sectionTitle}>Products near you</Text>
+                                    </View>
+                                    <View style={styles.masonryContainer}>
+                                        <View style={styles.masonryColumn}>
+                                            {filteredLeft.map((p) => (
+                                                <FCProduct
+                                                    key={`left-${p.id}`}
+                                                    product={p}
+                                                    onMeasured={onProductMeasured}
+                                                />
+                                            ))}
+                                        </View>
+                                        <View style={styles.masonryColumn}>
+                                            {filteredRight.map((p) => (
+                                                <FCProduct
+                                                    key={`right-${p.id}`}
+                                                    product={p}
+                                                    onMeasured={onProductMeasured}
+                                                />
+                                            ))}
+                                        </View>
+                                    </View>
 
-                        </View>
-                    </View>
+                                    {productsLoadingMore && (
+                                        <View style={{ paddingVertical: 6 }}>
+                                            <ActivityIndicator size="small" color="#2d253b" />
+                                        </View>
+                                    )}
 
-                    <View style={styles.containerSection}>
-                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-                            <Text style={styles.sectionTitle}>Products near you</Text>
-                        </View>
-                        <View style={styles.masonryContainer}>
-                            <View style={styles.masonryColumn}>
-                                {products
-                                    .filter((_, i) => i % 2 === 0)
-                                    .map((p, i) => (
-                                        <FCProduct key={`left-${i}`} product={p} />
-                                    ))}
-                            </View>
-                            <View style={styles.masonryColumn}>
-                                {products
-                                    .filter((_, i) => i % 2 === 1)
-                                    .map((p, i) => (
-                                        <FCProduct key={`right-${i}`} product={p} />
-                                    ))}
-                            </View>
-                        </View>
-                    </View>
+                                    {!productsLoadingMore && productsHasMore && (
+                                        <TouchableOpacity
+                                            onPress={loadMoreProducts}
+                                            activeOpacity={0.85}
+                                            style={{
+                                                alignSelf: 'center',
+                                                marginTop: 8,
+                                                backgroundColor: '#2d253b',
+                                                paddingHorizontal: 14,
+                                                paddingVertical: 10,
+                                                borderRadius: 12,
+                                            }}
+                                        >
+                                            <Text style={{ color: 'white', fontWeight: '900' }}>Load more</Text>
+                                        </TouchableOpacity>
+                                    )}
+                                </View>
+                            )}
+                        </>
+                    )}
                 </ScrollView>
             ) : (
                 locationLoading ? (
@@ -584,7 +949,7 @@ export default function BrowseScreen() {
                         )}
 
                         {/* Shop markers */}
-                        {Marker && shops.map((shop) => (
+                        {Marker && filteredShops.map((shop) => (
                             <Marker
                                 key={shop.id}
                                 coordinate={{
@@ -673,6 +1038,72 @@ export default function BrowseScreen() {
                         <Text style={{ color: 'white', fontWeight: 'bold', fontSize: 16 }}>View shop</Text>
                     </TouchableOpacity>
                 </Animated.View>
+            )}
+
+            {refreshPromptVisible && (
+                <View
+                    style={{
+                        position: 'absolute',
+                        left: 16,
+                        right: 16,
+                        bottom: selectedShop ? 320 : 90,
+                        backgroundColor: 'white',
+                        borderRadius: 14,
+                        padding: 12,
+                        shadowColor: '#000',
+                        shadowOffset: { width: 0, height: 4 },
+                        shadowOpacity: 0.15,
+                        shadowRadius: 10,
+                        elevation: 6,
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: 12,
+                    }}
+                >
+                    <Text style={{ flex: 1, fontWeight: '800', color: '#2d253b' }}>
+                        Nouvelle position détectée. Rafraîchir les résultats ?
+                    </Text>
+
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                        <TouchableOpacity
+                            activeOpacity={0.8}
+                            onPress={() => {
+                                dismissedForCoordsRef.current = pendingCoords;
+                                setRefreshPromptVisible(false);
+                            }}
+                        >
+                            <Text style={{ fontWeight: '900', color: '#6b7280' }}>Non</Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                            activeOpacity={0.85}
+                            onPress={async () => {
+                                if (!pendingCoords) return;
+                                setRefreshing(true);
+                                try {
+                                    await fetchNearbyWithCoords(pendingCoords);
+                                    lastFetchCoordsRef.current = pendingCoords;
+                                } catch (e) {
+                                    console.error('[BrowseScreen] Prompt refresh failed:', e);
+                                } finally {
+                                    setRefreshing(false);
+                                    dismissedForCoordsRef.current = null;
+                                    setPendingCoords(null);
+                                    setRefreshPromptVisible(false);
+                                }
+                            }}
+                            style={{
+                                backgroundColor: '#2d253b',
+                                paddingHorizontal: 12,
+                                paddingVertical: 8,
+                                borderRadius: 10,
+                            }}
+                        >
+                            <Text style={{ color: 'white', fontWeight: '900' }}>Refresh</Text>
+                        </TouchableOpacity>
+                    </View>
+                </View>
             )}
         </View >
     );

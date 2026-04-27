@@ -2,10 +2,13 @@ import { Ionicons } from '@expo/vector-icons';
 import React, { useState, useRef } from 'react'
 import { View, Text, Image, TouchableOpacity, Animated } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
+import { isShopFavorite, toggleShopFavorite } from '../lib/favorites';
+import { useSettings } from '../context/SettingsContext';
 
 export default function FCShop({ initialFavorite = false, shop }) {
 
     const navigation = useNavigation();
+    const { formatDistance, parseDistanceLabelToMeters } = useSettings();
 
     const shopData = shop || {
         id: '1',
@@ -13,12 +16,26 @@ export default function FCShop({ initialFavorite = false, shop }) {
         adress: 'Shay St. 17',
         rating: 4.8,
         reviews: 234,
+        distanceM: 1200,
         distance: '1.2 km',
         isFavorite: initialFavorite
     };
 
     const [isFavorite, setIsFavorite] = useState(shopData.isFavorite)
     const scaleAnim = useRef(new Animated.Value(1)).current
+
+    React.useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            try {
+                const fav = await isShopFavorite(shopData?.id);
+                if (!cancelled) setIsFavorite(Boolean(fav));
+            } catch {
+                // keep initial
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [shopData?.id]);
 
     const toggleShopToFavorite = () => {
         if (!isFavorite) {
@@ -37,12 +54,51 @@ export default function FCShop({ initialFavorite = false, shop }) {
                 }),
             ]).start()
         }
-        setIsFavorite((prev) => !prev)
+        ; (async () => {
+            try {
+                const snapshot = {
+                    id: shopData?.id,
+                    title: shopData?.title || shopData?.name || '',
+                    adress: shopData?.adress || shopData?.address || '',
+                    address: shopData?.address || shopData?.adress || '',
+                    distance: shopData?.distance || '',
+                    distanceM: shopData?.distanceM ?? null,
+                    rating: shopData?.rating,
+                    phone: shopData?.phone || '',
+                    logoUrl: shopData?.logoUrl || shopData?.logo_url || null,
+                    coverUrl: shopData?.coverUrl || shopData?.cover_url || null,
+                    latitude: shopData?.latitude,
+                    longitude: shopData?.longitude,
+                };
+                const next = await toggleShopFavorite({ id: shopData?.id, shop: snapshot });
+                setIsFavorite(Boolean(next));
+            } catch (e) {
+                console.error('[FCShop] toggle favorite failed', e);
+            }
+        })();
     }
 
     const handleShopPress = () => {
         navigation.navigate('ShopScreen', { shop: shopData });
     };
+
+    const coverUrl =
+        shopData?.coverUrl ||
+        shopData?.cover_url ||
+        shopData?.coverImage ||
+        shopData?.cover_image ||
+        null;
+    const logoUrl =
+        shopData?.logoUrl ||
+        shopData?.logo_url ||
+        shopData?.logoImage ||
+        shopData?.logo_image ||
+        null;
+
+    const coverSource =
+        coverUrl != null && String(coverUrl).trim() !== ''
+            ? { uri: String(coverUrl).trim() }
+            : null;
 
     return (
 
@@ -55,10 +111,15 @@ export default function FCShop({ initialFavorite = false, shop }) {
                 shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 3.84, elevation: 5
             }}>
             <View className="top" style={{ width: '100%', flex: 2, position: 'relative' }}>
-                <Image
-                    source={require('../../assets/apple-store.jpeg')}
-                    resizeMode="cover"
-                    style={{ width: '100%', height: '100%' }} />
+                {coverSource ? (
+                    <Image
+                        source={coverSource}
+                        resizeMode="cover"
+                        style={{ width: '100%', height: '100%' }}
+                    />
+                ) : (
+                    <View style={{ width: '100%', height: '100%', backgroundColor: '#e8ebf0' }} />
+                )}
                 <TouchableOpacity onPress={toggleShopToFavorite} activeOpacity={0.7} style={{
                     position: 'absolute', top: 5, right: 5, zIndex: 1, backgroundColor: '#ffffff88', padding: 4, borderRadius: 50, justifyContent: 'center', alignItems: 'center',
                 }}>
@@ -80,7 +141,13 @@ export default function FCShop({ initialFavorite = false, shop }) {
                     </View>
                     <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                         <Ionicons name="walk" size={24} color="#000709" />
-                        <Text style={{ fontWeight: 'bold' }}>{shopData.distance}</Text>
+                        <Text style={{ fontWeight: 'bold' }}>
+                            {shopData?.distanceM != null
+                                ? formatDistance(shopData.distanceM)
+                                : parseDistanceLabelToMeters(shopData?.distance) != null
+                                    ? formatDistance(parseDistanceLabelToMeters(shopData.distance))
+                                    : shopData.distance}
+                        </Text>
                     </View>
 
                 </View>

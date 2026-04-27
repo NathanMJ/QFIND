@@ -1,14 +1,38 @@
-import React, { useState, useRef } from 'react';
-import { View, Text, StyleSheet, ScrollView, StatusBar, TouchableOpacity, TextInput, Animated, Easing } from 'react-native';
+import React, { useCallback, useRef, useState } from 'react';
+import { View, Text, StyleSheet, ScrollView, StatusBar, TouchableOpacity, TextInput, Animated, Easing, Keyboard } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import FCShop from '../components/FCShop';
 import FCProduct from '../components/FCProduct';
+import { getFavoriteProducts, getFavoriteShops } from '../lib/favorites';
 
 export default function FavoritesScreen() {
+    const navigation = useNavigation();
     const [searchQuery, setSearchQuery] = useState('');
     const [isSearchOpen, setIsSearchOpen] = useState(false);
     const searchAnim = useRef(new Animated.Value(0)).current;
     const searchInputRef = useRef(null);
+
+    const [favoriteProducts, setFavoriteProducts] = useState([]);
+    const [favoriteShops, setFavoriteShops] = useState([]);
+
+    const refreshFavorites = useCallback(async () => {
+        try {
+            const [p, s] = await Promise.all([getFavoriteProducts(), getFavoriteShops()]);
+            setFavoriteProducts(p || []);
+            setFavoriteShops(s || []);
+        } catch (e) {
+            console.error('[FavoritesScreen] refresh failed', e);
+            setFavoriteProducts([]);
+            setFavoriteShops([]);
+        }
+    }, []);
+
+    useFocusEffect(
+        useCallback(() => {
+            refreshFavorites();
+        }, [refreshFavorites])
+    );
 
     const toggleSearch = () => {
         if (isSearchOpen) {
@@ -44,6 +68,23 @@ export default function FavoritesScreen() {
         outputRange: [0, 0.5, 1],
         extrapolate: 'clamp',
     });
+
+    const q = searchQuery.trim().toLowerCase();
+    const filteredProducts = favoriteProducts
+        .filter((f) => {
+            if (!q) return true;
+            const p = f?.product || {};
+            const hay = `${p?.name || ''} ${p?.store_infos || ''} ${p?.store_address || ''}`.toLowerCase();
+            return hay.includes(q);
+        });
+
+    const filteredShops = favoriteShops
+        .filter((f) => {
+            if (!q) return true;
+            const s = f?.shop || {};
+            const hay = `${s?.title || s?.name || ''} ${s?.address || s?.adress || ''}`.toLowerCase();
+            return hay.includes(q);
+        });
 
     return (
         <View style={styles.container}>
@@ -88,6 +129,8 @@ export default function FavoritesScreen() {
                         placeholder="Search favorites..."
                         value={searchQuery}
                         onChangeText={setSearchQuery}
+                        returnKeyType="search"
+                        onSubmitEditing={() => Keyboard.dismiss()}
                         style={{
                             flex: 1,
                             fontSize: 16,
@@ -111,7 +154,7 @@ export default function FavoritesScreen() {
                             <Ionicons name="storefront-outline" size={22} color="#2d253b" />
                             <Text style={styles.sectionTitle}>Shops</Text>
                         </View>
-                        <Text style={styles.sectionCount}>3 shops</Text>
+                        <Text style={styles.sectionCount}>{filteredShops.length} shops</Text>
                     </View>
 
                     <ScrollView
@@ -119,9 +162,9 @@ export default function FavoritesScreen() {
                         showsHorizontalScrollIndicator={false}
                         contentContainerStyle={{ gap: 3, paddingVertical: 5 }}
                     >
-                        <FCShop initialFavorite={true} />
-                        <FCShop initialFavorite={true} />
-                        <FCShop initialFavorite={true} />
+                        {filteredShops.map((f) => (
+                            <FCShop key={f.id} initialFavorite={true} shop={f.shop} />
+                        ))}
                     </ScrollView>
                 </View>
 
@@ -132,19 +175,55 @@ export default function FavoritesScreen() {
                             <Ionicons name="pricetag-outline" size={22} color="#2d253b" />
                             <Text style={styles.sectionTitle}>Products</Text>
                         </View>
-                        <Text style={styles.sectionCount}>4 products</Text>
+                        <Text style={styles.sectionCount}>{filteredProducts.length} products</Text>
                     </View>
 
                     <View style={styles.productsGrid}>
                         <View style={styles.productColumn}>
-                            <FCProduct initialFavorite={true} />
-                            <FCProduct initialFavorite={true} />
-                            <FCProduct initialFavorite={true} />
+                            {filteredProducts
+                                .filter((_, idx) => idx % 2 === 0)
+                                .map((f) => (
+                                    <FCProduct
+                                        key={f.id}
+                                        initialFavorite={true}
+                                        product={{
+                                            id: f?.product?.id || f.id,
+                                            name: f?.product?.name || 'Product',
+                                            price: f?.product?.price || '',
+                                            old_price: f?.product?.discountPrice || null,
+                                            store_infos: f?.product?.store_infos || '',
+                                            store_address: f?.product?.store_address || '',
+                                            distance: f?.product?.distance || '',
+                                            description: f?.product?.description || '',
+                                            inStock: f?.product?.inStock !== false,
+                                            img: f?.product?.imageUrl ? { uri: String(f.product.imageUrl) } : require('../../assets/sneakers.jpeg'),
+                                            images: f?.product?.imageUrl ? [String(f.product.imageUrl)] : [],
+                                        }}
+                                    />
+                                ))}
                         </View>
                         <View style={styles.productColumn}>
-                            <FCProduct initialFavorite={true} />
-                            <FCProduct initialFavorite={true} />
-                            <FCProduct initialFavorite={true} />
+                            {filteredProducts
+                                .filter((_, idx) => idx % 2 === 1)
+                                .map((f) => (
+                                    <FCProduct
+                                        key={f.id}
+                                        initialFavorite={true}
+                                        product={{
+                                            id: f?.product?.id || f.id,
+                                            name: f?.product?.name || 'Product',
+                                            price: f?.product?.price || '',
+                                            old_price: f?.product?.discountPrice || null,
+                                            store_infos: f?.product?.store_infos || '',
+                                            store_address: f?.product?.store_address || '',
+                                            distance: f?.product?.distance || '',
+                                            description: f?.product?.description || '',
+                                            inStock: f?.product?.inStock !== false,
+                                            img: f?.product?.imageUrl ? { uri: String(f.product.imageUrl) } : require('../../assets/sneakers.jpeg'),
+                                            images: f?.product?.imageUrl ? [String(f.product.imageUrl)] : [],
+                                        }}
+                                    />
+                                ))}
                         </View>
                     </View>
                 </View>

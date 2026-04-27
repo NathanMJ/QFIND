@@ -1,10 +1,9 @@
-import React, { useState, useRef } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
     View,
     Text,
     Image,
     ScrollView,
-    FlatList,
     TouchableOpacity,
     StyleSheet,
     Dimensions,
@@ -16,72 +15,193 @@ import {
     Modal,
     TextInput,
     KeyboardAvoidingView,
+    Switch,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import * as ImagePicker from 'expo-image-picker';
+import { firstProductImageSource, parseProductImageUrls } from '../lib/productImages';
+import { supabase } from '../lib/supabaseClient';
+import { getOrCreateOwnerUuid } from '../lib/ownerUuid';
+import { uploadProductImage } from '../lib/storageUpload';
+import { isProductFavorite, toggleProductFavorite } from '../lib/favorites';
+import { useSettings } from '../context/SettingsContext';
 
 const { width } = Dimensions.get('window');
 
-// Color options for product variants
-const COLOR_OPTIONS = [
-    { id: 'orange', color: '#E8732A' },
-    { id: 'green', color: '#3DAB3D' },
-    { id: 'lavender', color: '#D9C8E8' },
-];
-
-// Storage options
-const STORAGE_OPTIONS = ['256 GB', '512 GB', '1024 GB', '2048 GB'];
-
-// More products from same shop
-const MORE_FROM_SHOP = [
-    { id: 'm1', name: 'AirPods Pro 2', price: '279 $', img: require('../../assets/iphone.jpeg') },
-    { id: 'm2', name: 'Apple Watch Ultra', price: '899 $', img: require('../../assets/iphone.jpeg') },
-    { id: 'm3', name: 'iPad Pro 13"', price: '1299 $', img: require('../../assets/iphone.jpeg') },
-    { id: 'm4', name: 'MacBook Air M3', price: '1199 $', img: require('../../assets/iphone.jpeg') },
+const CURRENCY_OPTIONS = [
+    { code: 'EUR', label: 'Euro (€)' },
+    { code: 'USD', label: 'Dollar ($)' },
+    { code: 'GBP', label: 'Livre (£)' },
+    { code: 'ILS', label: 'Shekel (₪)' },
 ];
 
 export default function ProductScreen({ route, navigation }) {
-    const product = route?.params?.product || {
-        name: 'Iphone 17 Pro Max',
-        price: '1329 $',
-        discountPrice: '899 $',
-        store_infos: 'Apple Store',
-        store_address: 'Shay St 39, Tel Aviv-Yafo',
-        img: require('../../assets/iphone.jpeg'),
-        distance: '255 m',
-        inStock: true,
-        screenSize: "6,9'",
-        description: `Design & Display
-• 6.9-inch Super Retina XDR display with ProMotion 2.0 technology.
-• Chassis: New Grade 5 polished Titanium alloy, lighter and scratch-resistant.
-
-Performance
-• A19 Pro chip: 2nm process for record energy efficiency.
-• Memory: 12 GB of RAM minimum.`,
-        colors: COLOR_OPTIONS,
-        storageOptions: STORAGE_OPTIONS,
-    };
+    const product = route?.params?.product ?? null;
+    const { formatDistance } = useSettings();
 
     const isOwner = route?.params?.isOwner || false;
     const currentSection = route?.params?.currentSection || '';
     const availableSections = route?.params?.availableSections || [];
     const onProductUpdate = route?.params?.onProductUpdate;
+    const shopId = route?.params?.shopId ?? null;
+    const productRow = route?.params?.productRow ?? null;
 
     // ─── Display state ───
     const [displayProduct, setDisplayProduct] = useState(product);
+    const productId = displayProduct?.id || displayProduct?.row?.id || route?.params?.productRow?.id || null;
 
     const [isFavorite, setIsFavorite] = useState(false);
-    const [selectedColor, setSelectedColor] = useState(COLOR_OPTIONS[0].id);
-    const [selectedStorage, setSelectedStorage] = useState(STORAGE_OPTIONS[0]);
     const [showFullDescription, setShowFullDescription] = useState(false);
     const scaleAnim = useRef(new Animated.Value(1)).current;
     const [activeImageIndex, setActiveImageIndex] = useState(0);
 
-    // Build the images list
-    const imagesList = (displayProduct.images && displayProduct.images.length > 0)
-        ? displayProduct.images.map((uri) => (typeof uri === 'string' ? { uri } : uri))
-        : [displayProduct.img];
+    // Gallery sources (image_urls + legacy images). Dedupe & keep stable ordering.
+    const imageUrls = parseProductImageUrls(displayProduct);
+    const legacyUrisRaw = Array.isArray(displayProduct?.images) ? displayProduct.images : [];
+    const legacyUris = legacyUrisRaw
+        .map((x) => (typeof x === 'string' ? x : x?.uri))
+        .filter(Boolean)
+        .map(String);
+    const galleryUrls = Array.from(new Set([...imageUrls, ...legacyUris].filter(Boolean)));
+
+    const fallbackMain =
+        legacyUris.length > 0
+            ? { uri: legacyUris[0] }
+            : displayProduct?.img ?? null;
+
+    const gallerySources =
+        galleryUrls.length > 0
+            ? galleryUrls.map((u) => ({ uri: String(u) }))
+            : [fallbackMain].filter(Boolean);
+
+    const effectiveShopId =
+        shopId ||
+        productRow?.shop_id ||
+        displayProduct?.shop_id ||
+        displayProduct?.row?.shop_id ||
+        null;
+
+    const [shopData, setShopData] = useState(displayProduct?.shopData ?? null);
+    const [moreProducts, setMoreProducts] = useState([]);
+
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            try {
+                const fav = await isProductFavorite(productId);
+                if (!cancelled) setIsFavorite(Boolean(fav));
+            } catch {
+                if (!cancelled) setIsFavorite(false);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [productId]);
+
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            if (!effectiveShopId) {
+                setShopData((prev) => prev ?? null);
+                setMoreProducts([]);
+                return;
+            }
+
+            try {
+                // Fetch shop info for "Go to the shop"
+                if (!shopData || shopData?.id !== effectiveShopId) {
+                    const { data: shopRow, error: shopErr } = await supabase
+                        .from('shops')
+                        .select('id,name,address,category,phone,open_time,close_time,logo_url,cover_url')
+                        .eq('id', effectiveShopId)
+                        .maybeSingle();
+                    if (shopErr) throw shopErr;
+
+                    if (!cancelled) {
+                        setShopData(
+                            shopRow
+                                ? {
+                                    id: shopRow.id,
+                                    name: shopRow.name,
+                                    title: shopRow.name,
+                                    adress: shopRow.address || '',
+                                    address: shopRow.address || '',
+                                    category: shopRow.category || null,
+                                    phone: shopRow.phone || '',
+                                    openTime: shopRow.open_time || null,
+                                    open_time: shopRow.open_time || null,
+                                    closeTime: shopRow.close_time || null,
+                                    close_time: shopRow.close_time || null,
+                                    logoUrl: shopRow.logo_url || null,
+                                    logo_url: shopRow.logo_url || null,
+                                    coverUrl: shopRow.cover_url || null,
+                                    cover_url: shopRow.cover_url || null,
+                                }
+                                : null
+                        );
+                    }
+                }
+
+                // Fetch 5 more products from the same shop (exclude current product)
+                const { data: rows, error: prodErr } = await supabase
+                    .from('products')
+                    .select('id,name,price,discount_price,currency,image_urls,in_stock,created_at')
+                    .eq('shop_id', effectiveShopId)
+                    .neq('id', productId || '__none__')
+                    .order('created_at', { ascending: false })
+                    .limit(8);
+                if (prodErr) throw prodErr;
+
+                if (!cancelled) {
+                    const mapped = (rows || []).map((row) => {
+                        const urls = parseProductImageUrls(row);
+                        const currency = row.currency || 'EUR';
+                        const hasDiscount = row.discount_price != null;
+                        const priceLabel = row.price != null ? `${Number(row.price)} ${currency}` : '';
+                        const discountLabel =
+                            row.discount_price != null ? `${Number(row.discount_price)} ${currency}` : null;
+                        return {
+                            id: row.id,
+                            name: row.name,
+                            price: hasDiscount ? priceLabel : priceLabel,
+                            discountPrice: hasDiscount ? discountLabel : null,
+                            img: firstProductImageSource(urls, null),
+                            inStock: row.in_stock ?? true,
+                            row,
+                        };
+                    });
+                    setMoreProducts(mapped);
+                }
+            } catch (e) {
+                console.error('[ProductScreen] more/shop fetch failed', e);
+                if (!cancelled) setMoreProducts([]);
+            }
+        })();
+        return () => { cancelled = true; };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [effectiveShopId, productId]);
+
+    if (!displayProduct) {
+        return (
+            <View style={[styles.container, { justifyContent: 'center', alignItems: 'center', padding: 24 }]}>
+                <Ionicons name="pricetag-outline" size={64} color="#c7cbd3" />
+                <Text style={{ fontSize: 18, fontWeight: '800', color: '#2d253b', marginTop: 10 }}>
+                    Product not found
+                </Text>
+                <Text style={{ fontSize: 13, color: '#6b7280', fontWeight: '600', textAlign: 'center', marginTop: 6 }}>
+                    Please go back and select a product.
+                </Text>
+                <TouchableOpacity
+                    style={{ marginTop: 14, flexDirection: 'row', gap: 8, alignItems: 'center', backgroundColor: '#2d253b', paddingHorizontal: 14, paddingVertical: 12, borderRadius: 12 }}
+                    activeOpacity={0.85}
+                    onPress={() => navigation.goBack()}
+                >
+                    <Ionicons name="arrow-back" size={18} color="#fff" />
+                    <Text style={{ color: '#fff', fontWeight: '800' }}>Go back</Text>
+                </TouchableOpacity>
+            </View>
+        );
+    }
 
     // ─── Edit modal state ───
     const [editModalVisible, setEditModalVisible] = useState(false);
@@ -91,8 +211,11 @@ Performance
     const [editDescription, setEditDescription] = useState('');
     const [editImages, setEditImages] = useState([]);
     const [editSection, setEditSection] = useState('');
+    const [editCurrency, setEditCurrency] = useState('EUR');
+    const [editInStock, setEditInStock] = useState(true);
     const [newSectionName, setNewSectionName] = useState('');
     const [showNewSectionInput, setShowNewSectionInput] = useState(false);
+    const [savingEdit, setSavingEdit] = useState(false);
 
     const openEditModal = () => {
         const priceNum = displayProduct.price ? displayProduct.price.replace(/[^0-9.]/g, '') : '';
@@ -103,6 +226,8 @@ Performance
         setEditOldPrice(discountPriceNum);
         setEditDescription(displayProduct.description || '');
         setEditSection(currentSection);
+        setEditCurrency(productRow?.currency || displayProduct?.currency || 'EUR');
+        setEditInStock(displayProduct?.inStock ?? displayProduct?.in_stock ?? true);
         setShowNewSectionInput(false);
         setNewSectionName('');
 
@@ -162,32 +287,113 @@ Performance
             return;
         }
 
-        const hasDiscount = editOldPrice.trim() !== '';
-        const updatedData = {
-            name: editName.trim(),
-            price: `${editPrice.trim()} $`,
-            discountPrice: hasDiscount ? `${editOldPrice.trim()} $` : null,
-            description: editDescription.trim(),
-            images: editImages,
-            img: typeof editImages[0] === 'string' ? { uri: editImages[0] } : editImages[0],
-        };
-
-        setDisplayProduct((prev) => ({
-            ...prev,
-            name: updatedData.name,
-            price: updatedData.price,
-            discountPrice: updatedData.discountPrice,
-            description: updatedData.description,
-            images: updatedData.images,
-            img: updatedData.img,
-        }));
-
-        if (onProductUpdate && displayProduct.id) {
-            onProductUpdate(displayProduct.id, currentSection, section, updatedData);
+        if (!isOwner) {
+            Alert.alert('Error', 'You cannot edit this product.');
+            return;
+        }
+        if (!displayProduct?.id) {
+            Alert.alert('Error', 'Missing product id.');
+            return;
+        }
+        if (!shopId && !productRow?.shop_id) {
+            Alert.alert('Error', 'Missing shop id.');
+            return;
         }
 
-        setEditModalVisible(false);
-        Alert.alert('Saved!', 'Product has been updated.');
+        (async () => {
+            setSavingEdit(true);
+            try {
+                const effectiveShopId = shopId || productRow?.shop_id;
+                const ownerUuid = await getOrCreateOwnerUuid();
+
+                // Upload newly picked images (file://...) to Supabase Storage
+                const publicUrls = [];
+                for (let i = 0; i < editImages.length; i++) {
+                    const img = editImages[i];
+                    const uri = typeof img === 'string' ? img : img?.uri;
+                    if (!uri) continue;
+
+                    const isRemote = /^https?:\/\//i.test(uri);
+                    if (isRemote) {
+                        publicUrls.push(uri);
+                        continue;
+                    }
+
+                    const url = await uploadProductImage({
+                        ownerUuid,
+                        shopId: effectiveShopId,
+                        productId: displayProduct.id,
+                        index: i,
+                        localUri: uri,
+                        contentType: img?.mimeType,
+                    });
+                    publicUrls.push(url);
+                }
+
+                if (publicUrls.length === 0) {
+                    throw new Error('missing_images');
+                }
+
+                const priceNum = Number(editPrice.trim());
+                const hasDiscount = editOldPrice.trim() !== '';
+                const discountNum = hasDiscount ? Number(editOldPrice.trim()) : null;
+                const { data: updatedRow, error: upErr } = await supabase.rpc('update_product', {
+                    p_product_id: displayProduct.id,
+                    p_shop_id: effectiveShopId,
+                    p_name: editName.trim(),
+                    p_description: editDescription.trim() || null,
+                    p_price: Number.isFinite(priceNum) ? priceNum : null,
+                    p_discount_price:
+                        discountNum != null && Number.isFinite(discountNum) ? discountNum : null,
+                    p_currency: editCurrency || 'EUR',
+                    p_in_stock: Boolean(editInStock),
+                    p_image_urls: publicUrls,
+                    p_section_title: section,
+                });
+                if (upErr) throw upErr;
+                if (!updatedRow?.id) throw new Error('update_failed');
+
+                const currency = updatedRow.currency || editCurrency || productRow?.currency || 'EUR';
+
+                // Update UI models (screen + MyShopEditScreen callback)
+                const updatedData = {
+                    name: updatedRow.name,
+                    price: updatedRow.price != null ? `${Number(updatedRow.price)} ${currency}` : '',
+                    discountPrice:
+                        updatedRow.discount_price != null
+                            ? `${Number(updatedRow.discount_price)} ${currency}`
+                            : null,
+                    description: editDescription.trim(),
+                    images: publicUrls,
+                    img: { uri: publicUrls[0] },
+                    inStock: updatedRow.in_stock ?? Boolean(editInStock),
+                };
+
+                setDisplayProduct((prev) => ({
+                    ...prev,
+                    name: updatedData.name,
+                    price: updatedData.price,
+                    discountPrice: updatedData.discountPrice,
+                    description: updatedData.description,
+                    images: updatedData.images,
+                    img: updatedData.img,
+                    inStock: updatedData.inStock,
+                    in_stock: updatedData.inStock,
+                }));
+
+                if (onProductUpdate) {
+                    onProductUpdate(displayProduct.id, currentSection, section, updatedData);
+                }
+
+                setEditModalVisible(false);
+                Alert.alert('Saved!', 'Product has been updated.');
+            } catch (e) {
+                console.error('[ProductScreen] save edit failed', e);
+                Alert.alert('Error', 'Failed to update product. Please try again.');
+            } finally {
+                setSavingEdit(false);
+            }
+        })();
     };
 
     const toggleFavorite = () => {
@@ -197,7 +403,37 @@ Performance
                 Animated.spring(scaleAnim, { toValue: 1, useNativeDriver: true, speed: 20, bounciness: 10 }),
             ]).start();
         }
-        setIsFavorite((prev) => !prev);
+
+        (async () => {
+            try {
+                const imageUrl =
+                    (Array.isArray(imageUrls) && imageUrls[0]) ||
+                    (typeof mainImageSource === 'object' ? mainImageSource?.uri : null) ||
+                    null;
+
+                const productSnapshot = {
+                    id: productId,
+                    name: displayProduct?.name,
+                    price: displayProduct?.price,
+                    discountPrice: displayProduct?.discountPrice,
+                    description: displayProduct?.description,
+                    store_infos: displayProduct?.store_infos,
+                    store_address: displayProduct?.store_address,
+                    distance: displayProduct?.distance,
+                    distanceM: displayProduct?.distanceM ?? null,
+                    inStock: displayProduct?.inStock ?? displayProduct?.in_stock ?? true,
+                    imageUrl,
+                };
+
+                const next = await toggleProductFavorite({
+                    id: productId,
+                    product: productSnapshot,
+                });
+                setIsFavorite(Boolean(next));
+            } catch (e) {
+                console.error('[ProductScreen] toggle favorite failed', e);
+            }
+        })();
     };
 
     const handleFindShop = () => {
@@ -211,8 +447,9 @@ Performance
     };
 
     const handleGoToShop = () => {
-        if (displayProduct.shopData) {
-            navigation.navigate('ShopScreen', { shop: displayProduct.shopData });
+        const s = shopData || displayProduct.shopData;
+        if (s) {
+            navigation.navigate('ShopScreen', { shop: s });
         }
     };
 
@@ -237,83 +474,51 @@ Performance
                     </TouchableOpacity>
                 </View>
 
-                {/* Product Image(s) Slider */}
-                {imagesList.length > 1 ? (
-                    <View style={styles.imageContainer}>
-                        <FlatList
-                            data={imagesList}
-                            horizontal
-                            pagingEnabled
-                            showsHorizontalScrollIndicator={false}
-                            keyExtractor={(_, index) => index.toString()}
-                            onMomentumScrollEnd={(e) => {
-                                const index = Math.round(e.nativeEvent.contentOffset.x / width);
-                                setActiveImageIndex(index);
-                            }}
-                            renderItem={({ item }) => (
-                                <View style={{ width, alignItems: 'center', justifyContent: 'center' }}>
-                                    <Image source={item} style={styles.productImage} resizeMode="contain" />
-                                </View>
-                            )}
-                        />
-                        <View style={styles.paginationDots}>
-                            {imagesList.map((_, index) => (
-                                <View key={index} style={[styles.dot, activeImageIndex === index && styles.dotActive]} />
-                            ))}
-                        </View>
-                    </View>
-                ) : (
-                    <View style={styles.imageContainer}>
-                        <Image source={imagesList[0]} style={styles.productImage} resizeMode="contain" />
-                    </View>
-                )}
+                {/* Product images (horizontal scroll if multiple) */}
+                <View style={styles.imageContainer}>
+                    {gallerySources.length <= 1 ? (
+                        <Image source={gallerySources[0]} style={styles.productImage} resizeMode="contain" />
+                    ) : (
+                        <>
+                            <ScrollView
+                                horizontal
+                                pagingEnabled
+                                showsHorizontalScrollIndicator={false}
+                                onMomentumScrollEnd={(e) => {
+                                    const x = e.nativeEvent.contentOffset.x || 0;
+                                    const idx = Math.round(x / width);
+                                    setActiveImageIndex(Math.max(0, Math.min(idx, gallerySources.length - 1)));
+                                }}
+                            >
+                                {gallerySources.map((src, idx) => (
+                                    <View key={String(src?.uri || idx)} style={{ width, height: width * 0.7, alignItems: 'center', justifyContent: 'center' }}>
+                                        <Image source={src} style={styles.productImage} resizeMode="contain" />
+                                    </View>
+                                ))}
+                            </ScrollView>
+                            <View style={styles.paginationDots}>
+                                {gallerySources.map((_, i) => (
+                                    <View key={i} style={[styles.dot, i === activeImageIndex && styles.dotActive]} />
+                                ))}
+                            </View>
+                        </>
+                    )}
+                </View>
 
                 {/* Product Info */}
                 <View style={styles.productInfoSection}>
                     <View style={styles.nameRow}>
                         <View style={{ flex: 1 }}>
                             <Text style={styles.productName}>{displayProduct.name}</Text>
-                            {displayProduct.inStock !== false && <Text style={styles.inStockText}>in stock</Text>}
+                            {(displayProduct?.inStock ?? displayProduct?.in_stock ?? true)
+                                ? <Text style={styles.inStockText}>in stock</Text>
+                                : <Text style={[styles.inStockText, { color: '#e74c3c' }]}>out of stock</Text>}
                         </View>
                         <View style={styles.priceBlock}>
                             {displayProduct.discountPrice && <Text style={styles.oldPrice}>{displayProduct.price}</Text>}
                             <Text style={styles.currentPrice}>{displayProduct.discountPrice || displayProduct.price}</Text>
                         </View>
                     </View>
-
-                    <View style={styles.colorRow}>
-                        {(displayProduct.colors || COLOR_OPTIONS).map((c) => (
-                            <TouchableOpacity
-                                key={c.id}
-                                activeOpacity={1}
-                                onPress={() => setSelectedColor(c.id)}
-                                style={[styles.colorCircle, { backgroundColor: c.color }, selectedColor === c.id && styles.colorCircleSelected]}
-                            />
-                        ))}
-                    </View>
-
-                    <View style={styles.storageRow}>
-                        <View style={styles.storageIcon}>
-                            <Ionicons name="hardware-chip-outline" size={18} color="#666" />
-                        </View>
-                        {(displayProduct.storageOptions || STORAGE_OPTIONS).map((s) => (
-                            <TouchableOpacity
-                                key={s}
-                                activeOpacity={0.7}
-                                onPress={() => setSelectedStorage(s)}
-                                style={[styles.storageChip, selectedStorage === s && styles.storageChipSelected]}
-                            >
-                                <Text style={[styles.storageChipText, selectedStorage === s && styles.storageChipTextSelected]}>{s}</Text>
-                            </TouchableOpacity>
-                        ))}
-                    </View>
-
-                    {displayProduct.screenSize && (
-                        <View style={styles.screenSizeRow}>
-                            <Ionicons name="phone-portrait-outline" size={16} color="#666" />
-                            <Text style={styles.screenSizeText}>{displayProduct.screenSize}</Text>
-                        </View>
-                    )}
                 </View>
 
                 {/* Description */}
@@ -343,28 +548,73 @@ Performance
                         </TouchableOpacity>
                         <View style={styles.distanceBlock}>
                             <Ionicons name="walk-outline" size={18} color="#666" />
-                            <Text style={styles.distanceText}>{displayProduct.distance || '-- m'}</Text>
+                            <Text style={styles.distanceText}>
+                                {displayProduct?.distanceM != null ? formatDistance(displayProduct.distanceM) : (displayProduct.distance || '--')}
+                            </Text>
                         </View>
                     </View>
                 </View>
 
                 {/* More of the shop */}
-                <View style={styles.moreSection}>
-                    <View style={styles.moreHeader}>
-                        <Text style={styles.moreTitle}>More of the shop</Text>
-                        <TouchableOpacity onPress={handleGoToShop} activeOpacity={0.7} style={styles.shopLink}>
-                            <Text style={styles.shopLinkText}>Shop</Text>
-                            <Ionicons name="chevron-forward" size={18} color="#1a1a1a" />
+                {moreProducts.length > 0 && (
+                    <View style={styles.moreSection}>
+                        <View style={styles.moreHeader}>
+                            <Text style={styles.moreTitle}>More of the shop</Text>
+                            <TouchableOpacity onPress={handleGoToShop} activeOpacity={0.75} style={styles.shopLink}>
+                                <Text style={styles.shopLinkText}>Go</Text>
+                                <Ionicons name="chevron-forward" size={18} color="#1a1a1a" />
+                            </TouchableOpacity>
+                        </View>
+                        <ScrollView
+                            horizontal
+                            showsHorizontalScrollIndicator={false}
+                            contentContainerStyle={styles.moreScroll}
+                        >
+                            {moreProducts.map((p) => (
+                                <TouchableOpacity
+                                    key={p.id}
+                                    activeOpacity={0.85}
+                                    onPress={() =>
+                                        navigation.push('ProductScreen', {
+                                            product: {
+                                                ...p.row,
+                                                id: p.id,
+                                                name: p.name,
+                                                price: p.price,
+                                                discountPrice: p.discountPrice,
+                                                img: p.img,
+                                                store_infos: displayProduct.store_infos,
+                                                store_address: displayProduct.store_address,
+                                                distance: displayProduct.distance,
+                                                inStock: p.inStock,
+                                                in_stock: p.inStock,
+                                                shopData: shopData || displayProduct.shopData || null,
+                                            },
+                                            shopId: effectiveShopId,
+                                        })
+                                    }
+                                    style={styles.moreCard}
+                                >
+                                    <Image
+                                        source={p.img || displayProduct?.img}
+                                        style={styles.moreCardImage}
+                                        resizeMode="cover"
+                                    />
+                                </TouchableOpacity>
+                            ))}
+                        </ScrollView>
+                    </View>
+                )}
+
+                {/* Go to the shop (end of scroll) */}
+                {(shopData || displayProduct.shopData) && (
+                    <View style={styles.goShopWrap}>
+                        <TouchableOpacity style={styles.goShopBtn} activeOpacity={0.85} onPress={handleGoToShop}>
+                            <Ionicons name="storefront-outline" size={20} color="#fff" />
+                            <Text style={styles.goShopBtnText}>Go to the shop</Text>
                         </TouchableOpacity>
                     </View>
-                    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.moreScroll}>
-                        {MORE_FROM_SHOP.map((item) => (
-                            <TouchableOpacity key={item.id} activeOpacity={0.85} style={styles.moreCard}>
-                                <Image source={item.img} style={styles.moreCardImage} resizeMode="cover" />
-                            </TouchableOpacity>
-                        ))}
-                    </ScrollView>
-                </View>
+                )}
 
                 <View style={{ height: isOwner ? 80 : 30 }} />
             </ScrollView>
@@ -391,8 +641,37 @@ Performance
                             <Text style={styles.editLabel}>Product name *</Text>
                             <TextInput style={styles.editInput} placeholder="Product name" placeholderTextColor="#aaa" value={editName} onChangeText={setEditName} />
 
+                            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 12 }}>
+                                <Text style={[styles.editLabel, { marginTop: 0, marginBottom: 0 }]}>In stock</Text>
+                                <Switch
+                                    value={Boolean(editInStock)}
+                                    onValueChange={(v) => setEditInStock(Boolean(v))}
+                                    trackColor={{ false: '#d1d5db', true: '#2d253b' }}
+                                    thumbColor={editInStock ? '#fff' : '#fff'}
+                                />
+                            </View>
+
                             <Text style={styles.editLabel}>Price *</Text>
                             <TextInput style={styles.editInput} placeholder="e.g. 1199" placeholderTextColor="#aaa" value={editPrice} onChangeText={setEditPrice} keyboardType="numeric" />
+
+                            <Text style={styles.editLabel}>Currency</Text>
+                            <View style={styles.currencyRow}>
+                                {CURRENCY_OPTIONS.map((c) => {
+                                    const selected = editCurrency === c.code;
+                                    return (
+                                        <TouchableOpacity
+                                            key={c.code}
+                                            activeOpacity={0.75}
+                                            onPress={() => setEditCurrency(c.code)}
+                                            style={[styles.currencyChip, selected && styles.currencyChipSelected]}
+                                        >
+                                            <Text style={[styles.currencyChipText, selected && styles.currencyChipTextSelected]}>
+                                                {c.code}
+                                            </Text>
+                                        </TouchableOpacity>
+                                    );
+                                })}
+                            </View>
 
                             <Text style={styles.editLabel}>Discount price</Text>
                             <TextInput style={styles.editInput} placeholder="Leave empty if no discount" placeholderTextColor="#aaa" value={editOldPrice} onChangeText={setEditOldPrice} keyboardType="numeric" />
@@ -460,9 +739,14 @@ Performance
                             <View style={{ height: 20 }} />
                         </ScrollView>
 
-                        <TouchableOpacity style={styles.editSaveBtn} activeOpacity={0.8} onPress={handleSaveEdit}>
-                            <Ionicons name="checkmark-circle" size={22} color="#fff" />
-                            <Text style={styles.editSaveBtnText}>Save changes</Text>
+                        <TouchableOpacity
+                            style={[styles.editSaveBtn, savingEdit && { opacity: 0.7 }]}
+                            activeOpacity={0.8}
+                            onPress={handleSaveEdit}
+                            disabled={savingEdit}
+                        >
+                            <Ionicons name={savingEdit ? 'time-outline' : 'checkmark-circle'} size={22} color="#fff" />
+                            <Text style={styles.editSaveBtnText}>{savingEdit ? 'Saving…' : 'Save changes'}</Text>
                         </TouchableOpacity>
                     </View>
                 </KeyboardAvoidingView>
@@ -497,21 +781,7 @@ const styles = StyleSheet.create({
     currentPrice: { fontSize: 26, fontWeight: 'bold', color: '#1a1a1a' },
 
     // Colors
-    colorRow: { flexDirection: 'row', gap: 16, marginBottom: 18, paddingLeft: 4 },
-    colorCircle: { width: 36, height: 36, borderRadius: 18, borderWidth: 2, borderColor: 'transparent' },
-    colorCircleSelected: { borderColor: '#1a1a1a', borderWidth: 3 },
-
-    // Storage
-    storageRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10, flexWrap: 'wrap' },
-    storageIcon: { marginRight: 2 },
-    storageChip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8, borderWidth: 1.5, borderColor: '#ddd', backgroundColor: '#fff' },
-    storageChipSelected: { borderColor: '#1a1a1a', backgroundColor: '#f5f5f5' },
-    storageChipText: { fontSize: 13, fontWeight: '600', color: '#888' },
-    storageChipTextSelected: { color: '#1a1a1a' },
-
-    // Screen size
-    screenSizeRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
-    screenSizeText: { fontSize: 14, color: '#666', fontWeight: '500' },
+    // (removed: color/storage/screenSize selectors)
 
     // Description
     descriptionSection: { paddingHorizontal: 20, paddingVertical: 16, backgroundColor: '#fff', borderTopWidth: 1, borderTopColor: '#f0f0f0' },
@@ -540,6 +810,11 @@ const styles = StyleSheet.create({
     moreCard: { width: 130, height: 130, borderRadius: 12, overflow: 'hidden', backgroundColor: '#f8f8f8' },
     moreCardImage: { width: '100%', height: '100%' },
 
+    // Go to shop
+    goShopWrap: { paddingHorizontal: 20, paddingTop: 8, paddingBottom: 6 },
+    goShopBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: '#2d253b', borderRadius: 14, paddingVertical: 14 },
+    goShopBtnText: { color: '#fff', fontWeight: '800', fontSize: 16 },
+
     // FAB
     fab: { position: 'absolute', bottom: 24, right: 20, width: 56, height: 56, borderRadius: 28, backgroundColor: '#2d253b', justifyContent: 'center', alignItems: 'center', shadowColor: '#2d253b', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.35, shadowRadius: 8, elevation: 8 },
 
@@ -567,6 +842,13 @@ const styles = StyleSheet.create({
     editSectionChipNew: { borderStyle: 'dashed', borderColor: '#ccc' },
     editSectionChipText: { fontSize: 13, fontWeight: '600', color: '#666' },
     editSectionChipTextActive: { color: '#fff' },
+
+    // Currency chips
+    currencyRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 4, marginBottom: 6 },
+    currencyChip: { paddingHorizontal: 12, paddingVertical: 10, borderRadius: 12, backgroundColor: '#f2f4f7', borderWidth: 1.5, borderColor: 'transparent' },
+    currencyChipSelected: { backgroundColor: '#2d253b', borderColor: '#2d253b' },
+    currencyChipText: { fontSize: 13, fontWeight: '800', color: '#2d253b' },
+    currencyChipTextSelected: { color: '#fff' },
 
     // Save button
     editSaveBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#2d253b', borderRadius: 14, paddingVertical: 14, marginTop: 12, gap: 8 },

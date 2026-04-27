@@ -14,6 +14,8 @@ import HistoryScreen from '../screens/HistoryScreen';
 import SettingsScreen from '../screens/SettingsScreen';
 import MyShopsScreen from '../screens/MyShopsScreen';
 import MyShopEditScreen from '../screens/MyShopEditScreen';
+import ShopSectionScreen from '../screens/ShopSectionScreen';
+import ConfirmShopLocationScreen from '../screens/ConfirmShopLocationScreen';
 
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
@@ -72,6 +74,13 @@ export default function AppNavigator() {
                     }}
                 />
                 <Stack.Screen
+                    name="ShopSectionScreen"
+                    component={ShopSectionScreen}
+                    options={{
+                        animation: 'slide_from_right',
+                    }}
+                />
+                <Stack.Screen
                     name="ProductScreen"
                     component={ProductScreen}
                     options={{
@@ -109,6 +118,13 @@ export default function AppNavigator() {
                 <Stack.Screen
                     name="MyShopEditScreen"
                     component={MyShopEditScreen}
+                    options={{
+                        animation: 'slide_from_right',
+                    }}
+                />
+                <Stack.Screen
+                    name="ConfirmShopLocationScreen"
+                    component={ConfirmShopLocationScreen}
                     options={{
                         animation: 'slide_from_right',
                     }}

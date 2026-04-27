@@ -2,6 +2,8 @@ import { Ionicons } from '@expo/vector-icons'
 import React, { useState, useRef, useEffect } from 'react'
 import { View, Text, Image, TouchableOpacity, Animated } from 'react-native'
 import { useNavigation } from '@react-navigation/native';
+import { isProductFavorite, toggleProductFavorite } from '../lib/favorites';
+import { useSettings } from '../context/SettingsContext';
 
 const PRODUCTS = [
     {
@@ -46,10 +48,12 @@ Available in multiple seasonal colorways.`,
     },
 ]
 
-export default function FCProduct({ initialFavorite = false, index = 0, product: productProp }) {
+export default function FCProduct({ initialFavorite = false, index = 0, product: productProp, onMeasured }) {
 
     const navigation = useNavigation();
+    const { formatDistance, parseDistanceLabelToMeters } = useSettings();
     const product = productProp || PRODUCTS[index % PRODUCTS.length]
+    const productId = product?.id || product?.row?.id || null
 
     const [favoriteLogo, setFavoriteLogo] = useState(initialFavorite)
     const [imgAspectRatio, setImgAspectRatio] = useState(0.7)
@@ -76,6 +80,19 @@ export default function FCProduct({ initialFavorite = false, index = 0, product:
         }
     }, [product.img]);
 
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            try {
+                const fav = await isProductFavorite(productId);
+                if (!cancelled) setFavoriteLogo(Boolean(fav));
+            } catch {
+                // keep initial
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [productId]);
+
     const toggleProductToFavorite = () => {
         if (!favoriteLogo) {
             Animated.sequence([
@@ -89,7 +106,34 @@ export default function FCProduct({ initialFavorite = false, index = 0, product:
                 Animated.spring(scaleAnim, { toValue: 1, useNativeDriver: true, speed: 200, bounciness: 0, }),
             ]).start()
         }
-        setFavoriteLogo((prevS) => !prevS)
+
+        ; (async () => {
+            try {
+                const imageUrl =
+                    typeof product?.img === 'string'
+                        ? product.img
+                        : product?.img?.uri || null;
+
+                const snapshot = {
+                    id: productId,
+                    name: product?.name,
+                    price: product?.price,
+                    discountPrice: product?.old_price || product?.discountPrice || null,
+                    description: product?.description || '',
+                    store_infos: product?.store_infos || '',
+                    store_address: product?.store_address || '',
+                    distance: product?.distance || '',
+                    distanceM: product?.distanceM ?? null,
+                    inStock: product?.inStock !== false,
+                    imageUrl,
+                };
+
+                const next = await toggleProductFavorite({ id: productId, product: snapshot });
+                setFavoriteLogo(Boolean(next));
+            } catch (e) {
+                console.error('[FCProduct] toggle favorite failed', e);
+            }
+        })();
     }
 
     const handleProductPress = () => {
@@ -97,7 +141,17 @@ export default function FCProduct({ initialFavorite = false, index = 0, product:
     };
 
     return (
-        <View style={{ position: 'relative', width: '100%', marginBottom: 20 }}>
+        <View
+            onLayout={(e) => {
+                try {
+                    const h = e?.nativeEvent?.layout?.height;
+                    if (typeof onMeasured === 'function') onMeasured(productId, h);
+                } catch {
+                    // ignore measurement errors
+                }
+            }}
+            style={{ position: 'relative', width: '100%', marginBottom: 20 }}
+        >
             {/* Main Product Card */}
             <TouchableOpacity
                 activeOpacity={0.9}
@@ -131,9 +185,11 @@ export default function FCProduct({ initialFavorite = false, index = 0, product:
                             {product.name}
                         </Text>
                         <View style={{ alignItems: 'flex-end' }}>
-                            <Text style={{ color: 'red', fontSize: 12, textDecorationLine: 'line-through' }}>
-                                {product.old_price}
-                            </Text>
+                            {product.old_price ? (
+                                <Text style={{ color: 'red', fontSize: 12, textDecorationLine: 'line-through' }}>
+                                    {product.old_price}
+                                </Text>
+                            ) : null}
                             <Text style={{ fontWeight: 'bold', color: '#09262a', fontSize: 18 }}>
                                 {product.price}
                             </Text>
@@ -142,7 +198,13 @@ export default function FCProduct({ initialFavorite = false, index = 0, product:
 
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
                         <Ionicons name="location-sharp" size={14} color="#666" />
-                        <Text style={{ color: '#666', fontSize: 14 }}>{product.distance}</Text>
+                    <Text style={{ color: '#666', fontSize: 14 }}>
+                        {product?.distanceM != null
+                            ? formatDistance(product.distanceM)
+                            : parseDistanceLabelToMeters(product?.distance) != null
+                                ? formatDistance(parseDistanceLabelToMeters(product.distance))
+                                : product.distance}
+                    </Text>
                     </View>
                 </View>
 

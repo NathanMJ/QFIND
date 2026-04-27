@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
     View,
     Text,
@@ -8,131 +8,22 @@ import {
     StatusBar,
     Image,
     Animated,
+    ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useRoute } from '@react-navigation/native';
+import * as Location from 'expo-location';
+import { supabase } from '../lib/supabaseClient';
+import { useSettings } from '../context/SettingsContext';
 
 const LogoApple = require('../../assets/logo-apple.png');
 
-const NEARBY_SHOPS = [
-    {
-        id: '1',
-        name: 'Mega Sport',
-        title: 'Mega Sport',
-        category: 'Shopping',
-        adress: 'Shay Agnon St, Ashkelon',
-        latitude: 31.662121,
-        longitude: 34.554262,
-        description: 'Sports & Fitness Equipment',
-        rating: 4.5,
-        reviews: 187,
-        distance: '150 m',
-        phone: '+972-8-672-1234',
-        hours: '09:00 - 21:00',
-        isOpen: true,
-        logoIcon: 'fitness',
-        logoColor: '#FF6B6B',
-        logo: LogoApple,
-    },
-    {
-        id: '2',
-        name: 'Fox',
-        title: 'Fox',
-        category: 'Shopping',
-        adress: 'Shay Agnon St, Ashkelon',
-        latitude: 31.661033,
-        longitude: 34.555941,
-        description: 'Clothing & Fashion',
-        rating: 4.3,
-        reviews: 312,
-        distance: '200 m',
-        phone: '+972-8-672-5678',
-        hours: '09:30 - 22:00',
-        isOpen: true,
-        logoIcon: 'shirt',
-        logoColor: '#4ECDC4',
-        logo: LogoApple,
-    },
-    {
-        id: '3',
-        name: 'Mania Jeans',
-        title: 'Mania Jeans',
-        category: 'Shopping',
-        adress: 'Shay Agnon St, Ashkelon',
-        latitude: 31.6625,
-        longitude: 34.5548,
-        description: 'Jeans & Casual Wear',
-        rating: 4.2,
-        reviews: 98,
-        distance: '180 m',
-        phone: '+972-8-672-9012',
-        hours: '10:00 - 20:00',
-        isOpen: false,
-        logoIcon: 'body',
-        logoColor: '#45B7D1',
-        logo: LogoApple,
-    },
-    {
-        id: '4',
-        name: 'Studio Pasha',
-        title: 'Studio Pasha',
-        category: 'Shopping',
-        adress: 'Shay Agnon St, Ashkelon',
-        latitude: 31.6618,
-        longitude: 34.5555,
-        description: "Women's Fashion",
-        rating: 4.6,
-        reviews: 145,
-        distance: '250 m',
-        phone: '+972-8-672-3456',
-        hours: '09:00 - 21:30',
-        isOpen: true,
-        logoIcon: 'woman',
-        logoColor: '#F78FB3',
-        logo: LogoApple,
-    },
-    {
-        id: '5',
-        name: 'Lee Cooper Kids',
-        title: 'Lee Cooper Kids',
-        category: 'Shopping',
-        adress: 'Shay Agnon St, Ashkelon',
-        latitude: 31.6630,
-        longitude: 34.5540,
-        description: 'Kids Fashion',
-        rating: 4.4,
-        reviews: 76,
-        distance: '300 m',
-        phone: '+972-8-672-7890',
-        hours: '10:00 - 20:00',
-        isOpen: false,
-        logoIcon: 'happy',
-        logoColor: '#FFD93D',
-        logo: LogoApple,
-    },
-    {
-        id: '6',
-        name: "Yitzhak's Grocery",
-        title: "Yitzhak's Grocery",
-        category: 'Restaurants',
-        adress: 'Shay Agnon St 5, Ashkelon',
-        latitude: 31.6622,
-        longitude: 34.5537,
-        description: 'Fine Grocery & Local Products',
-        rating: 4.8,
-        reviews: 54,
-        distance: '120 m',
-        phone: '+972-8-672-1111',
-        hours: '08:00 - 20:00',
-        isOpen: true,
-        logoIcon: 'cart',
-        logoColor: '#A55EEA',
-        logo: LogoApple,
-    },
-];
+const DEFAULT_COORDS = { latitude: 31.6688, longitude: 34.5718 };
+const GPS_FIX_TIMEOUT_MS = 4000;
 
 function ShopListItem({ shop }) {
     const navigation = useNavigation();
+    const { formatDistance } = useSettings();
     const [isFavorite, setIsFavorite] = useState(false);
     const scaleAnim = useRef(new Animated.Value(1)).current;
 
@@ -168,11 +59,15 @@ function ShopListItem({ shop }) {
         >
             {/* Shop Image */}
             <View style={styles.shopImageContainer}>
-                <Image
-                    source={require('../../assets/apple-store.jpeg')}
-                    style={styles.shopImage}
-                    resizeMode="cover"
-                />
+                {(shop?.coverUrl || shop?.cover_url) ? (
+                    <Image
+                        source={{ uri: String(shop.coverUrl || shop.cover_url).trim() }}
+                        style={styles.shopImage}
+                        resizeMode="cover"
+                    />
+                ) : (
+                    <View style={styles.shopImagePlaceholder} />
+                )}
                 {/* Open/Closed badge */}
                 <View style={[
                     styles.statusBadge,
@@ -218,11 +113,17 @@ function ShopListItem({ shop }) {
                     </View>
                     {/* Logo */}
                     <View style={styles.shopLogo}>
-                        <Image
-                            source={shop.logo || LogoApple}
-                            style={{ width: '100%', height: '100%' }}
-                            resizeMode="cover"
-                        />
+                        {(shop?.logoUrl || shop?.logo_url) ? (
+                            <Image
+                                source={{ uri: String(shop.logoUrl || shop.logo_url).trim() }}
+                                style={{ width: '100%', height: '100%' }}
+                                resizeMode="cover"
+                            />
+                        ) : (
+                            <View style={styles.shopLogoPlaceholder}>
+                                <Ionicons name="storefront-outline" size={20} color="#2d253b" />
+                            </View>
+                        )}
                     </View>
                 </View>
 
@@ -239,7 +140,9 @@ function ShopListItem({ shop }) {
                     </View>
                     <View style={styles.metaItem}>
                         <Ionicons name="walk-outline" size={16} color="#3B82F6" />
-                        <Text style={styles.metaText}>{shop.distance}</Text>
+                        <Text style={styles.metaText}>
+                            {shop?.distanceM != null ? formatDistance(shop.distanceM) : shop.distance}
+                        </Text>
                     </View>
                     <View style={styles.metaItem}>
                         <Ionicons name="time-outline" size={16} color="#888" />
@@ -253,6 +156,125 @@ function ShopListItem({ shop }) {
 
 export default function ShopsListScreen() {
     const navigation = useNavigation();
+    const route = useRoute();
+    const { formatDistance } = useSettings();
+    const initialCoords = route?.params?.coords || null;
+    const appliedFilters = route?.params?.filters || null;
+    const appliedSearchQuery = route?.params?.searchQuery || '';
+
+    const [coords, setCoords] = useState(initialCoords);
+    const [shops, setShops] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const [errorMsg, setErrorMsg] = useState(null);
+
+    const resultsCountText = useMemo(() => {
+        if (loading) return 'Loading...';
+        if (errorMsg) return errorMsg;
+        return `${shops.length} shops found`;
+    }, [errorMsg, loading, shops.length]);
+
+    const resolveCoords = useRef(async () => {
+        try {
+            if (coords) return coords;
+
+            const { status } = await Location.requestForegroundPermissionsAsync();
+            if (status !== 'granted') return DEFAULT_COORDS;
+
+            const last = await Location.getLastKnownPositionAsync({ maxAge: 5 * 60 * 1000 });
+            if (last?.coords) {
+                return { latitude: last.coords.latitude, longitude: last.coords.longitude };
+            }
+
+            const pos = await Promise.race([
+                Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Low }),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('location_timeout')), GPS_FIX_TIMEOUT_MS)),
+            ]).catch(() => null);
+
+            if (!pos?.coords) return DEFAULT_COORDS;
+            return { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
+        } catch {
+            return DEFAULT_COORDS;
+        }
+    }).current;
+
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            setLoading(true);
+            setErrorMsg(null);
+            try {
+                const c = await resolveCoords();
+                if (cancelled) return;
+                setCoords(c);
+
+                const { data, error } = await supabase.rpc('get_nearby', {
+                    lat: c.latitude,
+                    lng: c.longitude,
+                    shops_limit: 100,
+                    products_limit: 0,
+                });
+                if (error) throw error;
+
+                const nearbyShops = data?.nearbyShops ?? [];
+                const mapped = nearbyShops.map((s) => ({
+                    id: s.id,
+                    name: s.name,
+                    title: s.name,
+                    category: s.category || 'Shop',
+                    adress: s.address || '',
+                    latitude: s.latitude,
+                    longitude: s.longitude,
+                    description: '',
+                    rating: 4.5,
+                    reviews: 0,
+                    distanceM: s.distance_m != null ? Number(s.distance_m) : null,
+                    distance: formatDistance(s.distance_m),
+                    phone: s.phone || '',
+                    openTime: s.open_time || null,
+                    closeTime: s.close_time || null,
+                    hours: s.open_time && s.close_time ? `${s.open_time} - ${s.close_time}` : '',
+                    isOpen: true,
+                    logo: s.logo_url ? { uri: s.logo_url } : LogoApple,
+                    logoUrl: s.logo_url || null,
+                    coverUrl: s.cover_url || null,
+                }));
+
+                let filtered = mapped;
+                const catNames = (appliedFilters?.categories || []).map((c) => c?.name).filter(Boolean);
+                if (catNames.length > 0) {
+                    const set = new Set(catNames);
+                    filtered = filtered.filter((s) => set.has(s.category));
+                }
+                const dist = appliedFilters?.distance;
+                if (dist != null) {
+                    const maxM = Number(dist);
+                    filtered = filtered.filter((s) => s.distanceM != null && s.distanceM <= maxM);
+                }
+
+                const q = String(appliedSearchQuery || '').trim().toLowerCase();
+                if (q) {
+                    filtered = filtered.filter((s) => {
+                        const hay = `${s?.name || s?.title || ''} ${s?.adress || s?.address || ''} ${s?.category || ''}`.toLowerCase();
+                        return hay.includes(q);
+                    });
+                }
+
+                if (!cancelled) setShops(filtered);
+            } catch (e) {
+                console.error('[ShopsListScreen] nearby fetch failed:', e);
+                if (!cancelled) {
+                    setShops([]);
+                    setErrorMsg('Failed to load nearby shops');
+                }
+            } finally {
+                if (!cancelled) setLoading(false);
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [appliedFilters, appliedSearchQuery, formatDistance, resolveCoords]);
 
     return (
         <View style={styles.container}>
@@ -273,24 +295,27 @@ export default function ShopsListScreen() {
 
             {/* Results count */}
             <View style={styles.resultsBar}>
-                <Text style={styles.resultsCount}>{NEARBY_SHOPS.length} shops found</Text>
-                <TouchableOpacity style={styles.sortButton} activeOpacity={0.7}>
-                    <Ionicons name="filter-outline" size={18} color="#2d253b" />
-                    <Text style={styles.sortText}>Sort</Text>
-                </TouchableOpacity>
+                <Text style={styles.resultsCount}>{resultsCountText}</Text>
             </View>
 
             {/* Shop List */}
-            <ScrollView
-                style={styles.scrollView}
-                contentContainerStyle={styles.scrollContent}
-                showsVerticalScrollIndicator={false}
-            >
-                {NEARBY_SHOPS.map((shop) => (
-                    <ShopListItem key={shop.id} shop={shop} />
-                ))}
-                <View style={{ height: 30 }} />
-            </ScrollView>
+            {loading ? (
+                <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+                    <ActivityIndicator size="large" color="#2d253b" />
+                    <Text style={{ marginTop: 10, color: '#2d253b' }}>Loading shops...</Text>
+                </View>
+            ) : (
+                <ScrollView
+                    style={styles.scrollView}
+                    contentContainerStyle={styles.scrollContent}
+                    showsVerticalScrollIndicator={false}
+                >
+                    {shops.map((shop) => (
+                        <ShopListItem key={shop.id} shop={shop} />
+                    ))}
+                    <View style={{ height: 30 }} />
+                </ScrollView>
+            )}
         </View>
     );
 }
@@ -340,20 +365,6 @@ const styles = StyleSheet.create({
         color: '#888',
         fontWeight: '500',
     },
-    sortButton: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: 6,
-        backgroundColor: '#e8ebf0',
-        paddingHorizontal: 14,
-        paddingVertical: 8,
-        borderRadius: 20,
-    },
-    sortText: {
-        fontSize: 14,
-        color: '#2d253b',
-        fontWeight: '600',
-    },
     scrollView: {
         flex: 1,
     },
@@ -381,6 +392,11 @@ const styles = StyleSheet.create({
     shopImage: {
         width: '100%',
         height: '100%',
+    },
+    shopImagePlaceholder: {
+        width: '100%',
+        height: '100%',
+        backgroundColor: '#e8ebf0',
     },
     statusBadge: {
         position: 'absolute',
@@ -445,6 +461,13 @@ const styles = StyleSheet.create({
         borderWidth: 2,
         borderColor: '#f0f0f0',
         backgroundColor: '#fff',
+    },
+    shopLogoPlaceholder: {
+        width: '100%',
+        height: '100%',
+        justifyContent: 'center',
+        alignItems: 'center',
+        backgroundColor: '#e8ebf0',
     },
     shopAddress: {
         flexDirection: 'row',

@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import {
     View,
     Text,
@@ -16,43 +16,49 @@ import {
     Modal,
     FlatList,
     KeyboardAvoidingView,
+    ActivityIndicator,
+    Switch,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import * as ImagePicker from 'expo-image-picker';
+import { supabase } from '../lib/supabaseClient';
+import { parseProductImageUrls, firstProductImageSource } from '../lib/productImages';
+import { getOrCreateOwnerUuid } from '../lib/ownerUuid';
+import { uploadProductImage, uploadShopImage } from '../lib/storageUpload';
 
 const { width } = Dimensions.get('window');
 const HEADER_HEIGHT = 220;
 const PICKER_ITEM_HEIGHT = 44;
 const LOGO_SIZE = 70;
 const EDIT_LOGO_SIZE = 90;
+const MAX_CATEGORIES = 5;
 
-// Initial dummy product data
-const INITIAL_PRODUCTS = {
-    'Last discounts': [
-        { id: '1', name: 'iPhone 16 Pro', distance: '255 m', price: '1199 $', discountPrice: '999 $', img: require('../../assets/iphone.jpeg'), description: '', stock: 10 },
-        { id: '2', name: 'MacBook Air', distance: '255 m', price: '1299 $', discountPrice: '1099 $', img: require('../../assets/iphone.jpeg'), description: '', stock: 5 },
-        { id: '3', name: 'AirPods Pro', distance: '255 m', price: '279 $', discountPrice: '219 $', img: require('../../assets/iphone.jpeg'), description: '', stock: 20 },
-        { id: '4', name: 'iPad Mini', distance: '255 m', price: '599 $', discountPrice: '499 $', img: require('../../assets/iphone.jpeg'), description: '', stock: 8 },
-    ],
-    'Phones': [
-        { id: '5', name: 'iPhone 16', distance: '255 m', price: '999 $', discountPrice: '899 $', img: require('../../assets/iphone.jpeg'), description: '', stock: 15 },
-        { id: '6', name: 'iPhone 16 Plus', distance: '255 m', price: '1099 $', discountPrice: null, img: require('../../assets/iphone.jpeg'), description: '', stock: 12 },
-        { id: '7', name: 'iPhone SE', distance: '255 m', price: '429 $', discountPrice: null, img: require('../../assets/iphone.jpeg'), description: '', stock: 25 },
-        { id: '8', name: 'iPhone 15', distance: '255 m', price: '899 $', discountPrice: '699 $', img: require('../../assets/iphone.jpeg'), description: '', stock: 7 },
-    ],
-    'Tablets': [
-        { id: '9', name: 'iPad Pro 13"', distance: '255 m', price: '1299 $', discountPrice: null, img: require('../../assets/iphone.jpeg'), description: '', stock: 4 },
-        { id: '10', name: 'iPad Air', distance: '255 m', price: '699 $', discountPrice: '599 $', img: require('../../assets/iphone.jpeg'), description: '', stock: 10 },
-        { id: '11', name: 'iPad 10th Gen', distance: '255 m', price: '449 $', discountPrice: null, img: require('../../assets/iphone.jpeg'), description: '', stock: 18 },
-        { id: '12', name: 'iPad Mini 7', distance: '255 m', price: '599 $', discountPrice: '499 $', img: require('../../assets/iphone.jpeg'), description: '', stock: 6 },
-    ],
-};
+const FALLBACK_PRODUCT_IMG = require('../../assets/sneakers.jpeg');
+const CURRENCY_OPTIONS = [
+    { code: 'EUR', label: 'Euro (€)' },
+    { code: 'USD', label: 'Dollar ($)' },
+    { code: 'GBP', label: 'Livre (£)' },
+    { code: 'ILS', label: 'Shekel (₪)' },
+];
+
+const SHOP_CATEGORIES = [
+    { key: 'Tech', label: 'Tech', icon: 'laptop-outline', color: '#6366F1' },
+    { key: 'Shopping', label: 'Shopping', icon: 'bag-outline', color: '#A78BFA' },
+    { key: 'Restaurants', label: 'Restaurants', icon: 'restaurant-outline', color: '#FF6B6B' },
+    { key: 'Cafes', label: 'Cafes', icon: 'cafe-outline', color: '#4ECDC4' },
+    { key: 'Services', label: 'Services', icon: 'construct-outline', color: '#3B82F6' },
+    { key: 'Health', label: 'Health', icon: 'fitness-outline', color: '#EC4899' },
+    { key: 'Beauty', label: 'Beauty', icon: 'sparkles-outline', color: '#F472B6' },
+    { key: 'Fun', label: 'Fun', icon: 'game-controller-outline', color: '#F59E0B' },
+    { key: 'Education', label: 'Education', icon: 'school-outline', color: '#14B8A6' },
+    { key: 'Automotive', label: 'Automotive', icon: 'car-outline', color: '#64748B' },
+];
 
 
 
 // ─── Product Card (same as ShopScreen) ───
-function ProductCard({ product, shopName, shopAddress, currentSection, availableSections, onProductUpdate }) {
+function ProductCard({ product, shopId, shopName, shopAddress, currentSection, availableSections, onProductUpdate }) {
     const navigation = useNavigation();
 
     const handlePress = () => {
@@ -74,6 +80,8 @@ function ProductCard({ product, shopName, shopAddress, currentSection, available
             currentSection,
             availableSections,
             onProductUpdate,
+            shopId,
+            productRow: product.row || null,
         });
     };
 
@@ -97,7 +105,7 @@ function ProductCard({ product, shopName, shopAddress, currentSection, available
     );
 }
 
-function CategorySection({ title, products, shopName, shopAddress, availableSections, onProductUpdate }) {
+function CategorySection({ title, products, shopId, shopName, shopAddress, availableSections, onProductUpdate }) {
     return (
         <View style={styles.categorySection}>
             <Text style={styles.categoryTitle}>{title}</Text>
@@ -110,6 +118,7 @@ function CategorySection({ title, products, shopName, shopAddress, availableSect
                     <ProductCard
                         key={product.id}
                         product={product}
+                        shopId={shopId}
                         shopName={shopName}
                         shopAddress={shopAddress}
                         currentSection={title}
@@ -129,26 +138,108 @@ export default function MyShopEditScreen() {
     const shopParam = route.params?.shop;
 
     // ─── Products state ───
-    const [shopProducts, setShopProducts] = useState(INITIAL_PRODUCTS);
+    const [catalogLoading, setCatalogLoading] = useState(true);
+    const [shopProducts, setShopProducts] = useState({});
+    const [sections, setSections] = useState([]);
+
+    const shopId = shopParam?.id ?? null;
+
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            if (!shopId) {
+                setShopProducts({});
+                setSections([]);
+                setCatalogLoading(false);
+                return;
+            }
+            setCatalogLoading(true);
+            try {
+                const { data: secRows, error: errSec } = await supabase
+                    .from('shop_sections')
+                    .select('id,title,sort_order')
+                    .eq('shop_id', shopId)
+                    .order('sort_order', { ascending: true });
+                if (errSec) throw errSec;
+
+                const { data: prodRows, error: errProd } = await supabase
+                    .from('products')
+                    .select('id,name,description,price,discount_price,currency,in_stock,image_urls,section_id,created_at')
+                    .eq('shop_id', shopId)
+                    .order('created_at', { ascending: false });
+                if (errProd) throw errProd;
+
+                if (cancelled) return;
+                const secs = secRows || [];
+                setSections(secs);
+
+                const bySection = {};
+                for (const p of prodRows || []) {
+                    const urls = parseProductImageUrls(p);
+                    const img = firstProductImageSource(urls, FALLBACK_PRODUCT_IMG);
+                    const sectionTitle =
+                        secs.find((s) => s.id === p.section_id)?.title ??
+                        'Products';
+                    const currency = p.currency || 'EUR';
+                    const hasDiscount = p.discount_price != null;
+                    const priceLabel = p.price != null ? `${Number(p.price)} ${currency}` : '';
+                    const discountLabel = hasDiscount ? `${Number(p.discount_price)} ${currency}` : null;
+                    const model = {
+                        id: p.id,
+                        name: p.name,
+                        description: p.description || '',
+                        price: priceLabel,
+                        discountPrice: discountLabel,
+                        img,
+                        images: urls,
+                        distance: '0 m',
+                        row: p,
+                        section_id: p.section_id,
+                    };
+                    if (!bySection[sectionTitle]) bySection[sectionTitle] = [];
+                    bySection[sectionTitle].push(model);
+                }
+                setShopProducts(bySection);
+            } catch (e) {
+                console.error('[MyShopEditScreen] catalog fetch failed', e);
+                if (!cancelled) {
+                    setShopProducts({});
+                    setSections([]);
+                }
+            } finally {
+                if (!cancelled) setCatalogLoading(false);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [shopId]);
 
     // ─── Add Product modal state ───
     const [addProductVisible, setAddProductVisible] = useState(false);
+    const [addingProduct, setAddingProduct] = useState(false);
     const [newProductName, setNewProductName] = useState('');
     const [newProductDescription, setNewProductDescription] = useState('');
     const [newProductPrice, setNewProductPrice] = useState('');
     const [newProductDiscountPrice, setNewProductDiscountPrice] = useState('');
-    const [newProductStock, setNewProductStock] = useState('');
+    const [newProductInStock, setNewProductInStock] = useState(true);
+    const [newProductCurrency, setNewProductCurrency] = useState('EUR');
     const [newProductSection, setNewProductSection] = useState('');
     const [newProductImages, setNewProductImages] = useState([]);
     const [showNewSectionInput, setShowNewSectionInput] = useState(false);
     const [newSectionName, setNewSectionName] = useState('');
 
     // ─── Saved (committed) shop data state ───
-    const [shopName, setShopName] = useState(shopParam?.name || 'My Shop');
+    const [shopName, setShopName] = useState(shopParam?.name || '');
     const [shopAddress, setShopAddress] = useState(shopParam?.address || shopParam?.adress || '');
     const [shopPhone, setShopPhone] = useState(shopParam?.phone || '');
-    const [openTime, setOpenTime] = useState(shopParam?.openTime || '09:00');
-    const [closeTime, setCloseTime] = useState(shopParam?.closeTime || '21:00');
+    const [shopCategories, setShopCategories] = useState(() => {
+        if (Array.isArray(shopParam?.categories) && shopParam.categories.length > 0) {
+            return shopParam.categories.map(String).filter(Boolean).slice(0, MAX_CATEGORIES);
+        }
+        if (shopParam?.category) return [String(shopParam.category)];
+        return [];
+    });
+    const [openTime, setOpenTime] = useState(shopParam?.openTime || shopParam?.open_time || '09:00');
+    const [closeTime, setCloseTime] = useState(shopParam?.closeTime || shopParam?.close_time || '21:00');
     const [logo, setLogo] = useState(shopParam?.logo || null);
     const [coverImage, setCoverImage] = useState(shopParam?.coverImage || null);
 
@@ -156,10 +247,12 @@ export default function MyShopEditScreen() {
     const [editName, setEditName] = useState(shopName);
     const [editAddress, setEditAddress] = useState(shopAddress);
     const [editPhone, setEditPhone] = useState(shopPhone);
+    const [editCategories, setEditCategories] = useState(shopCategories);
     const [editOpenTime, setEditOpenTime] = useState(openTime);
     const [editCloseTime, setEditCloseTime] = useState(closeTime);
     const [editLogo, setEditLogo] = useState(logo);
     const [editCoverImage, setEditCoverImage] = useState(coverImage);
+    const [savingShop, setSavingShop] = useState(false);
 
     // Time picker modal state
     const [timePickerVisible, setTimePickerVisible] = useState(false);
@@ -177,6 +270,7 @@ export default function MyShopEditScreen() {
 
     // Helper: compute open status from any openTime/closeTime
     const computeIsOpen = useCallback((ot, ct) => {
+        if (!ot || !ct) return false;
         const now = new Date();
         const currentMinutes = now.getHours() * 60 + now.getMinutes();
         const [openH, openM] = ot.split(':').map(Number);
@@ -197,20 +291,33 @@ export default function MyShopEditScreen() {
     // Draft open status (for edit preview)
     const editIsOpen = computeIsOpen(editOpenTime, editCloseTime);
 
+    const availableSections = useMemo(() => Object.keys(shopProducts || {}), [shopProducts]);
+
     // Initialize draft values when entering edit mode
     const enterEditMode = () => {
         setEditName(shopName);
         setEditAddress(shopAddress);
         setEditPhone(shopPhone);
+        setEditCategories(shopCategories);
         setEditOpenTime(openTime);
         setEditCloseTime(closeTime);
         setEditLogo(logo);
         setEditCoverImage(coverImage);
     };
 
+    const toggleCategory = (key) => {
+        setEditCategories((prev) => {
+            const current = Array.isArray(prev) ? prev : [];
+            const exists = current.includes(key);
+            if (exists) return current.filter((k) => k !== key);
+            if (current.length >= MAX_CATEGORIES) return current;
+            return [...current, key];
+        });
+    };
+
     const openTimePicker = (target) => {
-        const time = target === 'open' ? editOpenTime : editCloseTime;
-        const [h, m] = time.split(':');
+        const time = target === 'open' ? (editOpenTime || '09:00') : (editCloseTime || '21:00');
+        const [h, m] = String(time).split(':');
         setTempHour(h);
         setTempMinute(m);
         setTimePickerTarget(target);
@@ -322,32 +429,110 @@ export default function MyShopEditScreen() {
             Alert.alert('Error', 'Shop name is required.');
             return;
         }
-        // Commit draft values to saved state
-        setShopName(editName.trim());
-        setShopAddress(editAddress.trim());
-        setShopPhone(editPhone.trim());
-        setOpenTime(editOpenTime);
-        setCloseTime(editCloseTime);
-        setLogo(editLogo);
-        setCoverImage(editCoverImage);
-
-        const updatedShop = {
-            ...shopParam,
-            name: editName.trim(),
-            address: editAddress.trim(),
-            phone: editPhone.trim(),
-            openTime: editOpenTime,
-            closeTime: editCloseTime,
-            hours: `${editOpenTime} - ${editCloseTime}`,
-            logo: editLogo,
-            coverImage: editCoverImage,
-        };
-        if (route.params?.onUpdate) {
-            route.params.onUpdate(updatedShop);
+        if (!shopId) {
+            Alert.alert('Error', 'Missing shop id.');
+            return;
         }
-        Alert.alert('Saved!', 'Your shop has been updated.', [
-            { text: 'OK', onPress: () => setIsEditing(false) },
-        ]);
+
+        (async () => {
+            setSavingShop(true);
+            try {
+                const ownerUuid = await getOrCreateOwnerUuid();
+
+                const isRemote = (uri) => /^https?:\/\//i.test(String(uri || ''));
+
+                let nextLogoUrl = editLogo || null;
+                if (nextLogoUrl && !isRemote(nextLogoUrl)) {
+                    nextLogoUrl = await uploadShopImage({
+                        ownerUuid,
+                        shopId,
+                        kind: 'logo',
+                        localUri: nextLogoUrl,
+                    });
+                }
+
+                let nextCoverUrl = editCoverImage || null;
+                if (nextCoverUrl && !isRemote(nextCoverUrl)) {
+                    nextCoverUrl = await uploadShopImage({
+                        ownerUuid,
+                        shopId,
+                        kind: 'cover',
+                        localUri: nextCoverUrl,
+                    });
+                }
+
+                const cleanOrNull = (v) => {
+                    const s = String(v ?? '').trim();
+                    return s === '' ? null : s;
+                };
+
+                const { data: updatedRow, error } = await supabase.rpc('update_shop', {
+                    p_shop_id: shopId,
+                    p_owner: ownerUuid,
+                    p_name: cleanOrNull(editName) || undefined,
+                    p_address: cleanOrNull(editAddress),
+                    p_category: editCategories?.[0] ? String(editCategories[0]) : null,
+                    p_phone: cleanOrNull(editPhone),
+                    p_open_time: cleanOrNull(editOpenTime),
+                    p_close_time: cleanOrNull(editCloseTime),
+                    p_logo_url: nextLogoUrl,
+                    p_cover_url: nextCoverUrl,
+                });
+                if (error) throw error;
+                if (!updatedRow?.id) throw new Error('update_failed');
+
+                const savedName = updatedRow.name || editName.trim();
+                const savedAddress = updatedRow.address || '';
+                const savedPhone = updatedRow.phone || '';
+                const savedCategory = updatedRow.category || null;
+                const savedOpenTime = updatedRow.open_time || editOpenTime;
+                const savedCloseTime = updatedRow.close_time || editCloseTime;
+                const savedLogo = updatedRow.logo_url || null;
+                const savedCover = updatedRow.cover_url || null;
+
+                // Commit draft values to saved state (from DB)
+                setShopName(savedName);
+                setShopAddress(savedAddress);
+                setShopPhone(savedPhone);
+                setShopCategories(() => {
+                    if (editCategories?.length > 0) return editCategories.slice(0, MAX_CATEGORIES);
+                    if (savedCategory) return [String(savedCategory)];
+                    return [];
+                });
+                setOpenTime(savedOpenTime);
+                setCloseTime(savedCloseTime);
+                setLogo(savedLogo);
+                setCoverImage(savedCover);
+
+                const updatedShop = {
+                    ...shopParam,
+                    id: updatedRow.id,
+                    name: savedName,
+                    address: savedAddress,
+                    category: savedCategory,
+                    categories: editCategories?.length > 0 ? editCategories.slice(0, MAX_CATEGORIES) : (savedCategory ? [String(savedCategory)] : []),
+                    phone: savedPhone,
+                    openTime: savedOpenTime,
+                    closeTime: savedCloseTime,
+                    hours: savedOpenTime && savedCloseTime ? `${savedOpenTime} - ${savedCloseTime}` : '',
+                    logo: savedLogo,
+                    coverImage: savedCover,
+                };
+
+                if (route.params?.onUpdate) {
+                    route.params.onUpdate(updatedShop);
+                }
+
+                Alert.alert('Saved!', 'Your shop has been updated.', [
+                    { text: 'OK', onPress: () => setIsEditing(false) },
+                ]);
+            } catch (e) {
+                console.error('[MyShopEditScreen] update_shop failed', e);
+                Alert.alert('Error', 'Failed to save shop changes. Please try again.');
+            } finally {
+                setSavingShop(false);
+            }
+        })();
     };
 
     // ─── Add Product Logic ───
@@ -356,7 +541,8 @@ export default function MyShopEditScreen() {
         setNewProductDescription('');
         setNewProductPrice('');
         setNewProductDiscountPrice('');
-        setNewProductStock('');
+        setNewProductInStock(true);
+        setNewProductCurrency('EUR');
         setNewProductSection('');
         setNewProductImages([]);
         setShowNewSectionInput(false);
@@ -376,7 +562,11 @@ export default function MyShopEditScreen() {
             quality: 0.8,
         });
         if (!result.canceled && result.assets && result.assets.length > 0) {
-            setNewProductImages((prev) => [...prev, result.assets[0].uri]);
+            const a = result.assets[0];
+            setNewProductImages((prev) => [
+                ...prev,
+                { uri: a.uri, mimeType: a.mimeType || a.type || 'image/jpeg' },
+            ]);
         }
     };
 
@@ -411,32 +601,87 @@ export default function MyShopEditScreen() {
             return;
         }
 
-        const hasDiscount = newProductDiscountPrice.trim() !== '';
-        const newProduct = {
-            id: Date.now().toString(),
-            name: newProductName.trim(),
-            description: newProductDescription.trim(),
-            price: `${newProductPrice.trim()} $`,
-            discountPrice: hasDiscount ? `${newProductDiscountPrice.trim()} $` : null,
-            img: { uri: newProductImages[0] },
-            images: newProductImages,
-            stock: parseInt(newProductStock) || 0,
-            distance: '0 m',
-        };
+        if (!shopId) {
+            Alert.alert('Error', 'Missing shop id.');
+            return;
+        }
 
-        setShopProducts((prev) => {
-            const updated = { ...prev };
-            if (updated[section]) {
-                updated[section] = [...updated[section], newProduct];
-            } else {
-                updated[section] = [newProduct];
+        (async () => {
+            setAddingProduct(true);
+            try {
+                const ownerUuid = await getOrCreateOwnerUuid();
+                const productId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}`;
+
+                const publicUrls = [];
+                for (let i = 0; i < newProductImages.length; i++) {
+                    const imgAsset = newProductImages[i];
+                    const localUri = typeof imgAsset === 'string' ? imgAsset : imgAsset?.uri;
+                    const contentType = typeof imgAsset === 'string' ? undefined : imgAsset?.mimeType;
+                    const url = await uploadProductImage({
+                        ownerUuid,
+                        shopId,
+                        productId,
+                        index: i,
+                        localUri,
+                        contentType,
+                    });
+                    publicUrls.push(url);
+                }
+
+                const priceNum = Number(newProductPrice.trim());
+                const hasDiscount = newProductDiscountPrice.trim() !== '';
+                const discountNum = hasDiscount ? Number(newProductDiscountPrice.trim()) : null;
+
+                const { data, error } = await supabase.rpc('create_product', {
+                    p_shop_id: shopId,
+                    p_name: newProductName.trim(),
+                    p_description: newProductDescription.trim() || null,
+                    p_price: Number.isFinite(priceNum) ? priceNum : null,
+                    p_discount_price: discountNum != null && Number.isFinite(discountNum) ? discountNum : null,
+                    p_currency: newProductCurrency || 'EUR',
+                    p_in_stock: Boolean(newProductInStock),
+                    p_image_urls: publicUrls,
+                    p_section_title: section,
+                });
+                if (error) throw error;
+
+                // Refresh catalog
+                const urls = parseProductImageUrls(data);
+                const img = firstProductImageSource(urls, FALLBACK_PRODUCT_IMG);
+                const currency = data.currency || 'EUR';
+                const hasDisc = data.discount_price != null;
+                const priceLabel = data.price != null ? `${Number(data.price)} ${currency}` : '';
+                const discountLabel = hasDisc ? `${Number(data.discount_price)} ${currency}` : null;
+
+                const newModel = {
+                    id: data.id,
+                    name: data.name,
+                    description: data.description || '',
+                    price: priceLabel,
+                    discountPrice: discountLabel,
+                    img,
+                    images: urls,
+                    distance: '0 m',
+                    row: data,
+                    section_id: data.section_id,
+                };
+
+                setShopProducts((prev) => {
+                    const updated = { ...prev };
+                    if (!updated[section]) updated[section] = [];
+                    updated[section] = [newModel, ...updated[section]];
+                    return updated;
+                });
+
+                resetAddProductForm();
+                setAddProductVisible(false);
+            } catch (e) {
+                console.error('[MyShopEditScreen] add product failed', e);
+                Alert.alert('Error', 'Failed to add product. Please try again.');
+            } finally {
+                setAddingProduct(false);
             }
-            return updated;
-        });
-
-        resetAddProductForm();
-        setAddProductVisible(false);
-        Alert.alert('Success', `"${newProduct.name}" has been added to "${section}".`);
+        })();
     };
 
     // ─── Update Product Logic ───
@@ -492,11 +737,7 @@ export default function MyShopEditScreen() {
                         {editCoverImage ? (
                             <Image source={{ uri: editCoverImage }} style={styles.headerImage} resizeMode="cover" />
                         ) : (
-                            <Image
-                                source={require('../../assets/apple-store.jpeg')}
-                                style={styles.headerImage}
-                                resizeMode="cover"
-                            />
+                            <View style={[styles.headerImage, { backgroundColor: '#2d253b' }]} />
                         )}
                         <View style={styles.coverCameraBadge}>
                             <Ionicons name="camera" size={18} color="#fff" />
@@ -525,7 +766,7 @@ export default function MyShopEditScreen() {
                                     <Image source={{ uri: editLogo }} style={styles.editLogoImage} resizeMode="cover" />
                                 ) : (
                                     <View style={styles.editLogoPlaceholder}>
-                                        <Ionicons name="logo-apple" size={40} color="#000" />
+                                        <Ionicons name="storefront-outline" size={40} color="#2d253b" />
                                     </View>
                                 )}
                                 <View style={styles.logoCameraBadge}>
@@ -565,6 +806,48 @@ export default function MyShopEditScreen() {
                                 onChangeText={setEditPhone}
                                 keyboardType="phone-pad"
                             />
+
+                            <View style={styles.categoriesHeader}>
+                                <Text style={styles.inputLabel}>Categories</Text>
+                                <Text style={styles.categoryCount}>
+                                    {(editCategories?.length || 0)}/{MAX_CATEGORIES}
+                                </Text>
+                            </View>
+                            <View style={styles.categoriesGrid}>
+                                {SHOP_CATEGORIES.map((cat) => {
+                                    const isSelected = (editCategories || []).includes(cat.key);
+                                    const isDisabled = !isSelected && (editCategories || []).length >= MAX_CATEGORIES;
+                                    return (
+                                        <TouchableOpacity
+                                            key={cat.key}
+                                            activeOpacity={0.75}
+                                            onPress={() => toggleCategory(cat.key)}
+                                            disabled={isDisabled}
+                                            style={[
+                                                styles.categoryChip,
+                                                isSelected && { backgroundColor: cat.color + '20', borderColor: cat.color },
+                                                isDisabled && styles.categoryChipDisabled,
+                                            ]}
+                                        >
+                                            <Ionicons
+                                                name={cat.icon}
+                                                size={18}
+                                                color={isSelected ? cat.color : isDisabled ? '#ccc' : '#888'}
+                                            />
+                                            <Text
+                                                style={[
+                                                    styles.categoryChipText,
+                                                    isSelected && { color: cat.color, fontWeight: '700' },
+                                                    isDisabled && { color: '#ccc' },
+                                                ]}
+                                            >
+                                                {cat.label}
+                                            </Text>
+                                            {isSelected && <Ionicons name="checkmark-circle" size={16} color={cat.color} />}
+                                        </TouchableOpacity>
+                                    );
+                                })}
+                            </View>
 
                             <Text style={styles.inputLabel}>Opening hours</Text>
                             <View style={styles.timePickerRow}>
@@ -717,9 +1000,13 @@ export default function MyShopEditScreen() {
                 </Modal>
                 {/* Save Button */}
                 <View style={styles.saveContainer}>
-                    <TouchableOpacity style={styles.saveBtn} activeOpacity={0.8} onPress={handleSave}>
-                        <Ionicons name="checkmark-circle" size={22} color="#fff" />
-                        <Text style={styles.saveBtnText}>Save changes</Text>
+                    <TouchableOpacity style={[styles.saveBtn, savingShop && { opacity: 0.7 }]} activeOpacity={0.8} onPress={handleSave} disabled={savingShop}>
+                        {savingShop ? (
+                            <ActivityIndicator size="small" color="#fff" />
+                        ) : (
+                            <Ionicons name="checkmark-circle" size={22} color="#fff" />
+                        )}
+                        <Text style={styles.saveBtnText}>{savingShop ? 'Saving…' : 'Save changes'}</Text>
                     </TouchableOpacity>
                 </View>
             </View>
@@ -743,11 +1030,7 @@ export default function MyShopEditScreen() {
                     {coverImage ? (
                         <Image source={{ uri: coverImage }} style={styles.headerImage} resizeMode="cover" />
                     ) : (
-                        <Image
-                            source={require('../../assets/apple-store.jpeg')}
-                            style={styles.headerImage}
-                            resizeMode="cover"
-                        />
+                        <View style={[styles.headerImage, { backgroundColor: '#2d253b' }]} />
                     )}
                     {/* Back button */}
                     <TouchableOpacity
@@ -790,7 +1073,7 @@ export default function MyShopEditScreen() {
                             {logo ? (
                                 <Image source={{ uri: logo }} style={styles.logoCircleImage} resizeMode="cover" />
                             ) : (
-                                <Ionicons name="logo-apple" size={40} color="#000" />
+                                <Ionicons name="storefront-outline" size={40} color="#2d253b" />
                             )}
                         </View>
                     </View>
@@ -832,17 +1115,33 @@ export default function MyShopEditScreen() {
 
                 {/* Product Sections */}
                 <View style={styles.productsContainer}>
-                    {Object.entries(shopProducts).map(([category, products]) => (
-                        <CategorySection
-                            key={category}
-                            title={category}
-                            products={products}
-                            shopName={shopName}
-                            shopAddress={shopAddress}
-                            availableSections={Object.keys(shopProducts)}
-                            onProductUpdate={handleProductUpdate}
-                        />
-                    ))}
+                    {catalogLoading ? (
+                        <View style={{ paddingVertical: 24, alignItems: 'center' }}>
+                            <ActivityIndicator size="small" color="#2d253b" />
+                            <Text style={{ marginTop: 10, color: '#6b7280', fontWeight: '600' }}>Loading products…</Text>
+                        </View>
+                    ) : Object.keys(shopProducts).length === 0 ? (
+                        <View style={{ paddingVertical: 28, paddingHorizontal: 20, alignItems: 'center', gap: 10 }}>
+                            <Ionicons name="pricetag-outline" size={54} color="#c7cbd3" />
+                            <Text style={{ fontSize: 16, fontWeight: '800', color: '#2d253b' }}>No products yet</Text>
+                            <Text style={{ fontSize: 13, color: '#6b7280', fontWeight: '600', textAlign: 'center' }}>
+                                Tap the + button to add your first product.
+                            </Text>
+                        </View>
+                    ) : (
+                        Object.entries(shopProducts).map(([category, products]) => (
+                            <CategorySection
+                                key={category}
+                                title={category}
+                                products={products}
+                                shopId={shopId}
+                                shopName={shopName}
+                                shopAddress={shopAddress}
+                                availableSections={availableSections}
+                                onProductUpdate={handleProductUpdate}
+                            />
+                        ))
+                    )}
                 </View>
 
                 <View style={{ height: 80 }} />
@@ -892,9 +1191,9 @@ export default function MyShopEditScreen() {
                                 showsHorizontalScrollIndicator={false}
                                 contentContainerStyle={styles.addProductImagesRow}
                             >
-                                {newProductImages.map((uri, index) => (
+                                {newProductImages.map((img, index) => (
                                     <View key={index} style={styles.addProductImageWrapper}>
-                                        <Image source={{ uri }} style={styles.addProductImage} />
+                                        <Image source={{ uri: typeof img === 'string' ? img : img?.uri }} style={styles.addProductImage} />
                                         <TouchableOpacity
                                             style={styles.addProductImageRemove}
                                             onPress={() => removeProductImage(index)}
@@ -964,20 +1263,44 @@ export default function MyShopEditScreen() {
                             </View>
 
                             {/* Stock */}
-                            <Text style={styles.addProductLabel}>Stock quantity</Text>
-                            <TextInput
-                                style={styles.addProductInput}
-                                placeholder="e.g. 10"
-                                placeholderTextColor="#bbb"
-                                value={newProductStock}
-                                onChangeText={setNewProductStock}
-                                keyboardType="numeric"
-                            />
+                            <Text style={styles.addProductLabel}>In stock</Text>
+                            <View style={styles.inStockRow}>
+                                <View style={styles.inStockLeft}>
+                                    <Ionicons name={newProductInStock ? 'checkmark-circle' : 'close-circle'} size={18} color={newProductInStock ? '#27ae60' : '#e74c3c'} />
+                                    <Text style={styles.inStockText}>{newProductInStock ? 'Yes' : 'No'}</Text>
+                                </View>
+                                <Switch
+                                    value={newProductInStock}
+                                    onValueChange={setNewProductInStock}
+                                    trackColor={{ false: '#d1d5db', true: '#9be7d7' }}
+                                    thumbColor={newProductInStock ? '#1ba5b8' : '#9ca3af'}
+                                />
+                            </View>
+
+                            {/* Currency */}
+                            <Text style={styles.addProductLabel}>Currency</Text>
+                            <View style={styles.currencyRow}>
+                                {CURRENCY_OPTIONS.map((c) => {
+                                    const selected = newProductCurrency === c.code;
+                                    return (
+                                        <TouchableOpacity
+                                            key={c.code}
+                                            activeOpacity={0.75}
+                                            onPress={() => setNewProductCurrency(c.code)}
+                                            style={[styles.currencyChip, selected && styles.currencyChipSelected]}
+                                        >
+                                            <Text style={[styles.currencyChipText, selected && styles.currencyChipTextSelected]}>
+                                                {c.code}
+                                            </Text>
+                                        </TouchableOpacity>
+                                    );
+                                })}
+                            </View>
 
                             {/* Section Picker */}
                             <Text style={styles.addProductLabel}>Section *</Text>
                             <View style={styles.sectionPickerContainer}>
-                                {Object.keys(shopProducts).map((section) => (
+                                {availableSections.map((section) => (
                                     <TouchableOpacity
                                         key={section}
                                         style={[
@@ -1033,12 +1356,17 @@ export default function MyShopEditScreen() {
                         {/* Add Button */}
                         <View style={styles.addProductFooter}>
                             <TouchableOpacity
-                                style={styles.addProductBtn}
+                                style={[styles.addProductBtn, addingProduct && { opacity: 0.6 }]}
                                 activeOpacity={0.8}
                                 onPress={handleAddProduct}
+                                disabled={addingProduct}
                             >
-                                <Ionicons name="bag-add" size={22} color="#fff" />
-                                <Text style={styles.addProductBtnText}>Add product</Text>
+                                {addingProduct ? (
+                                    <ActivityIndicator size="small" color="#fff" />
+                                ) : (
+                                    <Ionicons name="bag-add" size={22} color="#fff" />
+                                )}
+                                <Text style={styles.addProductBtnText}>{addingProduct ? 'Adding…' : 'Add product'}</Text>
                             </TouchableOpacity>
                         </View>
                     </View>
@@ -1376,6 +1704,42 @@ const styles = StyleSheet.create({
         paddingVertical: 13,
         fontSize: 15,
         color: '#2d253b',
+    },
+    categoriesHeader: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+    },
+    categoryCount: {
+        fontSize: 13,
+        fontWeight: '600',
+        color: '#999',
+        marginTop: 14,
+    },
+    categoriesGrid: {
+        flexDirection: 'row',
+        flexWrap: 'wrap',
+        gap: 8,
+        marginTop: 4,
+    },
+    categoryChip: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+        paddingHorizontal: 12,
+        paddingVertical: 10,
+        borderRadius: 12,
+        backgroundColor: '#f2f4f7',
+        borderWidth: 1.5,
+        borderColor: 'transparent',
+    },
+    categoryChipDisabled: {
+        opacity: 0.4,
+    },
+    categoryChipText: {
+        fontSize: 13,
+        fontWeight: '600',
+        color: '#666',
     },
     saveContainer: {
         position: 'absolute',
@@ -1724,6 +2088,57 @@ const styles = StyleSheet.create({
         color: '#555',
     },
     sectionChipTextSelected: {
+        color: '#fff',
+    },
+
+    // ─── In-stock toggle row ───
+    inStockRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        marginHorizontal: 20,
+        backgroundColor: '#f2f4f7',
+        borderRadius: 12,
+        paddingHorizontal: 14,
+        paddingVertical: 12,
+    },
+    inStockLeft: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+    },
+    inStockText: {
+        fontSize: 15,
+        fontWeight: '700',
+        color: '#2d253b',
+    },
+
+    // ─── Currency chips ───
+    currencyRow: {
+        flexDirection: 'row',
+        flexWrap: 'wrap',
+        gap: 8,
+        paddingHorizontal: 16,
+        marginTop: 4,
+    },
+    currencyChip: {
+        paddingHorizontal: 12,
+        paddingVertical: 10,
+        borderRadius: 12,
+        backgroundColor: '#f2f4f7',
+        borderWidth: 1.5,
+        borderColor: 'transparent',
+    },
+    currencyChipSelected: {
+        backgroundColor: '#2d253b',
+        borderColor: '#2d253b',
+    },
+    currencyChipText: {
+        fontSize: 13,
+        fontWeight: '800',
+        color: '#2d253b',
+    },
+    currencyChipTextSelected: {
         color: '#fff',
     },
 

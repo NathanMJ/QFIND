@@ -6,7 +6,7 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "scheme": "qfind",
     "splash": {
       "image": "./assets/splash-icon.png",
@@ -30,7 +30,12 @@
     },
     "plugins": [
       "expo-dev-client"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "fe7b9dcc-9529-448c-9ec4-86d8c5e51559"
+      }
+    },
+    "owner": "nathanmim"
   }
 }
-

@@ -1,24 +1,31 @@
-import React, { useState, useRef } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
     View,
     Text,
     StyleSheet,
     TouchableOpacity,
+    Pressable,
     ScrollView,
     Image,
     Alert,
     TextInput,
     Modal,
     KeyboardAvoidingView,
+    Keyboard,
     Platform,
     Animated,
     Dimensions,
+    ActivityIndicator,
 } from 'react-native';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
+const SHOP_MENU_WIDTH = 168;
+const SHOP_MENU_SCREEN_MARGIN = 8;
 const PICKER_ITEM_HEIGHT = 44;
 import { Ionicons } from '@expo/vector-icons';
-import { useNavigation } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
+import { supabase } from '../lib/supabaseClient';
+import { getOrCreateOwnerUuid } from '../lib/ownerUuid';
 
 // Available shop categories
 const SHOP_CATEGORIES = [
@@ -36,25 +43,40 @@ const SHOP_CATEGORIES = [
 
 const MAX_CATEGORIES = 5;
 
-// Beta access code — change this to whatever code you give to testers
-const BETA_ACCESS_CODE = 'QFIND2026';
-
-// Simulated user shops (will be shared state later)
-const INITIAL_SHOPS = [
-    {
-        id: '1',
-        name: 'Apple Store',
-        address: 'Shay St 39, Tel Aviv',
-        phone: '+972-3-1234567',
-        hours: '09:00 - 21:00',
-        logo: null, // null means use default icon
-        coverImage: null,
-    },
-];
+/** When Photon omits housenumber, try to keep a number the user typed (e.g. "Shay Agnon 32"). */
+function guessHouseNumberFromQuery(query, streetHint, nameHint) {
+    const qh = String(query || '').trim();
+    if (!qh) return '';
+    const contextLower = `${streetHint || ''} ${nameHint || ''}`.toLowerCase();
+    const re = /\b(\d{1,4}[a-zA-Z]?)\b/g;
+    const candidates = [];
+    let m;
+    while ((m = re.exec(qh)) !== null) {
+        const token = m[1];
+        if (/^\d{7}$/.test(token)) continue;
+        if (/^\d{5}$/.test(token)) continue;
+        if (/^\d{4}$/.test(token)) {
+            const n = parseInt(token, 10);
+            if (n >= 1900 && n <= 2099) continue;
+        }
+        candidates.push(token);
+    }
+    if (candidates.length === 0) return '';
+    const uniq = [...new Set(candidates)];
+    for (const c of uniq) {
+        if (!contextLower.includes(c.toLowerCase())) return c;
+    }
+    return uniq[0] || '';
+}
 
 export default function MyShopsScreen() {
     const navigation = useNavigation();
-    const [shops, setShops] = useState(INITIAL_SHOPS);
+    const [shops, setShops] = useState([]);
+    const [shopsLoading, setShopsLoading] = useState(true);
+    const [shopMenuOpenId, setShopMenuOpenId] = useState(null);
+    const [shopMenuLayout, setShopMenuLayout] = useState(null);
+    const menuBtnRefs = useRef({});
+    const [ownerUuid, setOwnerUuid] = useState(null);
     const [modalVisible, setModalVisible] = useState(false);
     const [newShopName, setNewShopName] = useState('');
     const [newShopAddress, setNewShopAddress] = useState('');
@@ -62,6 +84,71 @@ export default function MyShopsScreen() {
     const [newShopOpenTime, setNewShopOpenTime] = useState('09:00');
     const [newShopCloseTime, setNewShopCloseTime] = useState('21:00');
     const [selectedCategories, setSelectedCategories] = useState([]);
+
+    // Address autocomplete (OSM via Photon - works well on mobile without API key)
+    const [addressSuggestions, setAddressSuggestions] = useState([]);
+    const [addressSuggestLoading, setAddressSuggestLoading] = useState(false);
+    const [addressSuggestError, setAddressSuggestError] = useState('');
+    const [addressFieldFocused, setAddressFieldFocused] = useState(false);
+    const addressReqSeq = useRef(0);
+    const skipAddressSuggestUntilRefocus = useRef(false);
+    const addressInputRef = useRef(null);
+    /** Delay blur so a tap on a suggestion can run onPress before the list unmounts. */
+    const addressBlurTimeoutRef = useRef(null);
+
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            try {
+                const uuid = await getOrCreateOwnerUuid();
+                if (!cancelled) setOwnerUuid(uuid);
+                // Register UUID in DB (no-op if already exists)
+                await supabase.rpc('ensure_owner', { p_owner: uuid });
+            } catch (e) {
+                console.error('[MyShopsScreen] owner uuid init failed', e);
+                if (!cancelled) setOwnerUuid(null);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, []);
+
+    const fetchMyShops = useCallback(async () => {
+        if (!ownerUuid) return;
+        setShopsLoading(true);
+        try {
+            const { data, error } = await supabase
+                .from('shops')
+                .select('id,name,address,category,phone,open_time,close_time,logo_url,cover_url,created_at,owner_uuid')
+                .eq('owner_uuid', ownerUuid)
+                .order('created_at', { ascending: false });
+            if (error) throw error;
+
+            const mapped = (data || []).map((s) => ({
+                id: s.id,
+                name: s.name,
+                address: s.address || '',
+                phone: s.phone || '',
+                openTime: s.open_time || null,
+                closeTime: s.close_time || null,
+                hours: s.open_time && s.close_time ? `${s.open_time} - ${s.close_time}` : '',
+                logo: s.logo_url || null,
+                coverImage: s.cover_url ? s.cover_url : null,
+                category: s.category || null,
+            }));
+            setShops(mapped);
+        } catch (e) {
+            console.error('[MyShopsScreen] fetch shops failed', e);
+            setShops([]);
+        } finally {
+            setShopsLoading(false);
+        }
+    }, [ownerUuid]);
+
+    useFocusEffect(
+        useCallback(() => {
+            fetchMyShops();
+        }, [fetchMyShops])
+    );
 
     const toggleCategory = (key) => {
         setSelectedCategories((prev) => {
@@ -116,10 +203,12 @@ export default function MyShopsScreen() {
         setCreateTimePickerVisible(false);
     };
 
-    // Beta code gate state
+    // Beta code gate state (codes and quotas live in public.beta_access_codes)
     const [betaModalVisible, setBetaModalVisible] = useState(false);
     const [betaCode, setBetaCode] = useState('');
     const [betaError, setBetaError] = useState('');
+    const [betaVerifyLoading, setBetaVerifyLoading] = useState(false);
+    const [grantedBetaCode, setGrantedBetaCode] = useState('');
     const shakeAnim = useRef(new Animated.Value(0)).current;
 
     const triggerShake = () => {
@@ -134,23 +223,37 @@ export default function MyShopsScreen() {
         ]).start();
     };
 
-    const handleBetaCodeSubmit = () => {
-        if (betaCode.trim().toUpperCase() === BETA_ACCESS_CODE) {
-            // Code is correct — close beta modal and open shop creation modal
-            setBetaModalVisible(false);
-            setBetaCode('');
-            setBetaError('');
-            setModalVisible(true);
-        } else {
-            // Wrong code — show error + shake
-            setBetaError('Invalid access code. Please try again.');
+    const handleBetaCodeSubmit = async () => {
+        const raw = betaCode.trim();
+        if (!raw) return;
+        setBetaVerifyLoading(true);
+        setBetaError('');
+        try {
+            const { data, error } = await supabase.rpc('verify_beta_access_code', { p_code: raw });
+            if (error) throw error;
+            if (data === true) {
+                setGrantedBetaCode(raw.toUpperCase());
+                setBetaModalVisible(false);
+                setBetaCode('');
+                setBetaError('');
+                setModalVisible(true);
+            } else {
+                setBetaError('Invalid access code. Please try again.');
+                triggerShake();
+            }
+        } catch (e) {
+            console.error('[MyShopsScreen] verify_beta_access_code failed', e);
+            setBetaError('Unable to verify. Check your connection.');
             triggerShake();
+        } finally {
+            setBetaVerifyLoading(false);
         }
     };
 
     const handleOpenBetaModal = () => {
         setBetaCode('');
         setBetaError('');
+        setGrantedBetaCode('');
         setBetaModalVisible(true);
     };
 
@@ -159,19 +262,19 @@ export default function MyShopsScreen() {
             Alert.alert('Error', 'Please enter a shop name.');
             return;
         }
-        const newShop = {
-            id: Date.now().toString(),
+        if (!String(grantedBetaCode || '').trim()) {
+            Alert.alert('Error', 'Please verify your beta access code first.');
+            return;
+        }
+        const draftShop = {
             name: newShopName.trim(),
-            address: newShopAddress.trim() || 'No address',
+            address: newShopAddress.trim() || '',
             phone: newShopPhone.trim() || '',
-            hours: `${newShopOpenTime} - ${newShopCloseTime}`,
             openTime: newShopOpenTime,
             closeTime: newShopCloseTime,
             categories: selectedCategories,
-            logo: null,
-            coverImage: null,
+            betaAccessCode: grantedBetaCode.trim(),
         };
-        setShops([...shops, newShop]);
         setNewShopName('');
         setNewShopAddress('');
         setNewShopPhone('');
@@ -179,7 +282,111 @@ export default function MyShopsScreen() {
         setNewShopCloseTime('21:00');
         setSelectedCategories([]);
         setModalVisible(false);
+
+        navigation.navigate('ConfirmShopLocationScreen', { draftShop });
     };
+
+    useEffect(() => {
+        // Reset suggestions whenever modal closes
+        if (!modalVisible) {
+            if (addressBlurTimeoutRef.current) {
+                clearTimeout(addressBlurTimeoutRef.current);
+                addressBlurTimeoutRef.current = null;
+            }
+            setAddressSuggestions([]);
+            setAddressSuggestLoading(false);
+            setAddressSuggestError('');
+            setAddressFieldFocused(false);
+            skipAddressSuggestUntilRefocus.current = false;
+        }
+    }, [modalVisible]);
+
+    useEffect(() => {
+        if (!modalVisible) return;
+
+        if (!addressFieldFocused || skipAddressSuggestUntilRefocus.current) {
+            setAddressSuggestLoading(false);
+            setAddressSuggestions([]);
+            setAddressSuggestError('');
+            return;
+        }
+
+        const query = String(newShopAddress || '').trim();
+        if (query.length < 3) {
+            setAddressSuggestions([]);
+            setAddressSuggestLoading(false);
+            setAddressSuggestError('');
+            return;
+        }
+
+        const seq = ++addressReqSeq.current;
+        setAddressSuggestLoading(true);
+        setAddressSuggestError('');
+
+        const t = setTimeout(() => {
+            (async () => {
+                try {
+                    const url =
+                        'https://photon.komoot.io/api/' +
+                        `?q=${encodeURIComponent(query)}&limit=5&lang=fr`;
+
+                    const res = await fetch(url, {
+                        headers: {
+                            Accept: 'application/json',
+                            'Accept-Language': 'fr',
+                        },
+                    });
+                    if (!res.ok) throw new Error(`addr_autocomplete_http_${res.status}`);
+                    const json = await res.json().catch(() => null);
+
+                    // Ignore out-of-date responses
+                    if (addressReqSeq.current !== seq) return;
+
+                    const features = Array.isArray(json?.features) ? json.features : [];
+                    const mapped = features
+                        .map((f) => {
+                            const p = f?.properties || {};
+                            const street = p.street ? String(p.street) : (p.name ? String(p.name) : '');
+                            const nameOnly = p.name && p.street ? String(p.name) : '';
+                            let house = p.housenumber ? String(p.housenumber) : '';
+                            if (!house) {
+                                const guessed = guessHouseNumberFromQuery(query, street, nameOnly);
+                                if (guessed) house = guessed;
+                            }
+                            const city = p.city ? String(p.city) : (p.state ? String(p.state) : '');
+                            const country = p.country ? String(p.country) : '';
+
+                            const streetAddress = [house, street].filter(Boolean).join(' ').trim();
+                            const label = [country, city, streetAddress].filter(Boolean).join(', ').trim();
+
+                            const coords = Array.isArray(f?.geometry?.coordinates) ? f.geometry.coordinates : null;
+                            const lon = coords?.[0] != null ? Number(coords[0]) : null;
+                            const lat = coords?.[1] != null ? Number(coords[1]) : null;
+
+                            return {
+                                id: String(p.osm_id ?? p.osm_key ?? p.name ?? Math.random()),
+                                label: label || String(p.name || '').trim(),
+                                lat,
+                                lon,
+                            };
+                        })
+                        .filter((x) => x.label);
+
+                    setAddressSuggestions(mapped);
+                    if (mapped.length === 0) setAddressSuggestError('No results.');
+                } catch (e) {
+                    if (addressReqSeq.current !== seq) return;
+                    setAddressSuggestions([]);
+                    setAddressSuggestError('Unable to fetch suggestions. Check your connection.');
+                } finally {
+                    if (addressReqSeq.current !== seq) return;
+                    setAddressSuggestLoading(false);
+                }
+            })();
+        }, 350);
+
+        return () => clearTimeout(t);
+    }, [modalVisible, newShopAddress, addressFieldFocused]);
 
     const handleUpdateShop = (updatedShop) => {
         setShops((prev) =>
@@ -187,11 +394,78 @@ export default function MyShopsScreen() {
         );
     };
 
+    const closeShopMenu = useCallback(() => {
+        setShopMenuOpenId(null);
+        setShopMenuLayout(null);
+    }, []);
+
+    const openShopMenuAtButton = useCallback((shopId) => {
+        const r = menuBtnRefs.current[shopId];
+        if (r?.measureInWindow) {
+            r.measureInWindow((x, y, w, h) => {
+                setShopMenuLayout({ x, y, width: w, height: h });
+                setShopMenuOpenId(shopId);
+            });
+        } else {
+            setShopMenuLayout(null);
+            setShopMenuOpenId(shopId);
+        }
+    }, []);
+
+    const onPressShopMenuTrigger = useCallback(
+        (shop) => {
+            if (shopMenuOpenId === shop.id) {
+                closeShopMenu();
+                return;
+            }
+            openShopMenuAtButton(shop.id);
+        },
+        [shopMenuOpenId, closeShopMenu, openShopMenuAtButton]
+    );
+
     const handleShopPress = (shop) => {
+        closeShopMenu();
         navigation.navigate('MyShopEditScreen', {
             shop,
             onUpdate: handleUpdateShop,
         });
+    };
+
+    const promptRemoveShop = (shop) => {
+        Alert.alert(
+            'Remove shop',
+            'Are you sure to remove the shop?',
+            [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                    text: 'Remove',
+                    style: 'destructive',
+                    onPress: () => {
+                        void performRemoveShop(shop);
+                    },
+                },
+            ]
+        );
+    };
+
+    const performRemoveShop = async (shop) => {
+        closeShopMenu();
+        try {
+            const ownerUuid = await getOrCreateOwnerUuid();
+            if (!ownerUuid) {
+                Alert.alert('Error', 'Unable to identify this device.');
+                return;
+            }
+            const { error } = await supabase.rpc('delete_shop', {
+                p_shop_id: shop.id,
+                p_owner: ownerUuid,
+            });
+            if (error) throw error;
+            setShops((prev) => prev.filter((s) => s.id !== shop.id));
+        } catch (e) {
+            console.error('[MyShopsScreen] delete_shop failed', e);
+            Alert.alert('Error', 'Could not remove the shop. Please try again.');
+        }
     };
 
     return (
@@ -220,8 +494,15 @@ export default function MyShopsScreen() {
                 style={styles.content}
                 showsVerticalScrollIndicator={false}
                 contentContainerStyle={styles.scrollContent}
+                onScrollBeginDrag={closeShopMenu}
+                keyboardShouldPersistTaps="handled"
             >
-                {shops.length === 0 ? (
+                {shopsLoading ? (
+                    <View style={styles.emptyState}>
+                        <ActivityIndicator size="large" color="#2d253b" />
+                        <Text style={styles.emptySubText}>Loading your shops…</Text>
+                    </View>
+                ) : shops.length === 0 ? (
                     <View style={styles.emptyState}>
                         <Ionicons name="storefront-outline" size={64} color="#ccc" />
                         <Text style={styles.emptyText}>No shops yet</Text>
@@ -231,55 +512,123 @@ export default function MyShopsScreen() {
                     </View>
                 ) : (
                     shops.map((shop) => (
-                        <TouchableOpacity
-                            key={shop.id}
-                            style={styles.shopCard}
-                            activeOpacity={0.7}
-                            onPress={() => handleShopPress(shop)}
-                        >
-                            {/* Cover image preview */}
-                            <View style={styles.shopCoverContainer}>
-                                {shop.coverImage ? (
-                                    <Image
-                                        source={{ uri: shop.coverImage }}
-                                        style={styles.shopCover}
-                                        resizeMode="cover"
-                                    />
-                                ) : (
-                                    <View style={styles.shopCoverPlaceholder}>
-                                        <Ionicons name="image-outline" size={32} color="#ccc" />
-                                    </View>
-                                )}
-                                {/* Logo overlay on cover */}
-                                <View style={styles.shopLogoOverlay}>
-                                    {shop.logo ? (
-                                        <Image
-                                            source={{ uri: shop.logo }}
-                                            style={styles.shopLogoImage}
-                                            resizeMode="cover"
-                                        />
-                                    ) : (
-                                        <View style={styles.shopLogoPlaceholder}>
-                                            <Ionicons name="storefront" size={24} color="#2d253b" />
+                        <View key={shop.id} style={styles.shopCard}>
+                            <TouchableOpacity
+                                activeOpacity={0.7}
+                                onPress={() => handleShopPress(shop)}
+                            >
+                                <View style={styles.shopCoverClip}>
+                                    <View style={styles.shopCoverContainer}>
+                                        {shop.coverImage ? (
+                                            <Image
+                                                source={{ uri: shop.coverImage }}
+                                                style={styles.shopCover}
+                                                resizeMode="cover"
+                                            />
+                                        ) : (
+                                            <View style={styles.shopCoverPlaceholder}>
+                                                <Ionicons name="image-outline" size={32} color="#ccc" />
+                                            </View>
+                                        )}
+                                        <View style={styles.shopLogoOverlay}>
+                                            {shop.logo ? (
+                                                <Image
+                                                    source={{ uri: shop.logo }}
+                                                    style={styles.shopLogoImage}
+                                                    resizeMode="cover"
+                                                />
+                                            ) : (
+                                                <View style={styles.shopLogoPlaceholder}>
+                                                    <Ionicons name="storefront" size={24} color="#2d253b" />
+                                                </View>
+                                            )}
                                         </View>
-                                    )}
+                                    </View>
+                                </View>
+                            </TouchableOpacity>
+
+                            <View style={styles.shopBottomRow}>
+                                <TouchableOpacity
+                                    style={styles.shopInfoTouchable}
+                                    activeOpacity={0.7}
+                                    onPress={() => handleShopPress(shop)}
+                                >
+                                    <View style={styles.shopInfo}>
+                                        <Text style={styles.shopName}>{shop.name}</Text>
+                                        <Text style={styles.shopAddress}>{shop.address}</Text>
+                                    </View>
+                                </TouchableOpacity>
+
+                                <View style={styles.shopMenuColumn}>
+                                    <TouchableOpacity
+                                        ref={(el) => {
+                                            if (el) menuBtnRefs.current[shop.id] = el;
+                                            else delete menuBtnRefs.current[shop.id];
+                                        }}
+                                        style={styles.shopMenuBtn}
+                                        onPress={() => onPressShopMenuTrigger(shop)}
+                                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                                        activeOpacity={0.65}
+                                    >
+                                        <Ionicons name="ellipsis-horizontal" size={22} color="#888" />
+                                    </TouchableOpacity>
                                 </View>
                             </View>
-
-                            {/* Shop info */}
-                            <View style={styles.shopInfo}>
-                                <Text style={styles.shopName}>{shop.name}</Text>
-                                <Text style={styles.shopAddress}>{shop.address}</Text>
-                            </View>
-
-                            {/* Arrow */}
-                            <View style={styles.shopArrow}>
-                                <Ionicons name="chevron-forward" size={20} color="#bbb" />
-                            </View>
-                        </TouchableOpacity>
+                        </View>
                     ))
                 )}
             </ScrollView>
+
+            <Modal
+                visible={Boolean(shopMenuOpenId && shopMenuLayout)}
+                transparent
+                animationType="fade"
+                statusBarTranslucent={Platform.OS === 'android'}
+                onRequestClose={closeShopMenu}
+            >
+                <View style={styles.shopMenuModalRoot}>
+                    <Pressable style={StyleSheet.absoluteFillObject} onPress={closeShopMenu} />
+                    {(() => {
+                        if (!shopMenuOpenId || !shopMenuLayout) return null;
+                        const menuShop = shops.find((s) => s.id === shopMenuOpenId);
+                        if (!menuShop) return null;
+                        const top = shopMenuLayout.y + shopMenuLayout.height + 4;
+                        const left = Math.max(
+                            SHOP_MENU_SCREEN_MARGIN,
+                            Math.min(
+                                shopMenuLayout.x + shopMenuLayout.width - SHOP_MENU_WIDTH,
+                                SCREEN_WIDTH - SHOP_MENU_SCREEN_MARGIN - SHOP_MENU_WIDTH
+                            )
+                        );
+                        return (
+                            <View
+                                style={[
+                                    styles.shopMenuDropdownModal,
+                                    { top, left, width: SHOP_MENU_WIDTH },
+                                ]}
+                            >
+                                <TouchableOpacity
+                                    style={styles.shopMenuItem}
+                                    activeOpacity={0.7}
+                                    onPress={() => {
+                                        closeShopMenu();
+                                        promptRemoveShop(menuShop);
+                                    }}
+                                >
+                                    <Text style={styles.shopMenuItemDanger}>Remove shop</Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity
+                                    style={styles.shopMenuItem}
+                                    activeOpacity={0.7}
+                                    onPress={closeShopMenu}
+                                >
+                                    <Text style={styles.shopMenuItemMuted}>Cancel</Text>
+                                </TouchableOpacity>
+                            </View>
+                        );
+                    })()}
+                </View>
+            </Modal>
 
             {/* Add Shop Modal */}
             <Modal
@@ -303,7 +652,10 @@ export default function MyShopsScreen() {
                             </TouchableOpacity>
                         </View>
 
-                        <ScrollView showsVerticalScrollIndicator={false}>
+                        <ScrollView
+                            showsVerticalScrollIndicator={false}
+                            keyboardShouldPersistTaps="handled"
+                        >
                             <Text style={styles.inputLabel}>Shop name *</Text>
                             <TextInput
                                 style={styles.input}
@@ -314,13 +666,84 @@ export default function MyShopsScreen() {
                             />
 
                             <Text style={styles.inputLabel}>Address</Text>
-                            <TextInput
-                                style={styles.input}
-                                placeholder="e.g. 123 Main Street"
-                                placeholderTextColor="#aaa"
-                                value={newShopAddress}
-                                onChangeText={setNewShopAddress}
-                            />
+                            <View style={{ position: 'relative' }}>
+                                <TextInput
+                                    ref={addressInputRef}
+                                    style={styles.input}
+                                    placeholder="e.g. 123 Main Street"
+                                    placeholderTextColor="#aaa"
+                                    value={newShopAddress}
+                                    onChangeText={setNewShopAddress}
+                                    autoCorrect={false}
+                                    onFocus={() => {
+                                        if (addressBlurTimeoutRef.current) {
+                                            clearTimeout(addressBlurTimeoutRef.current);
+                                            addressBlurTimeoutRef.current = null;
+                                        }
+                                        skipAddressSuggestUntilRefocus.current = false;
+                                        setAddressFieldFocused(true);
+                                    }}
+                                    onBlur={() => {
+                                        if (addressBlurTimeoutRef.current) {
+                                            clearTimeout(addressBlurTimeoutRef.current);
+                                        }
+                                        addressBlurTimeoutRef.current = setTimeout(() => {
+                                            addressBlurTimeoutRef.current = null;
+                                            setAddressFieldFocused(false);
+                                            setAddressSuggestions([]);
+                                            setAddressSuggestLoading(false);
+                                            setAddressSuggestError('');
+                                        }, 200);
+                                    }}
+                                />
+
+                                {addressFieldFocused &&
+                                (addressSuggestLoading || addressSuggestions.length > 0 || addressSuggestError) ? (
+                                    <View style={styles.suggestionBox}>
+                                        {addressSuggestLoading ? (
+                                            <View style={styles.suggestionLoadingRow}>
+                                                <ActivityIndicator size="small" color="#2d253b" />
+                                                <Text style={styles.suggestionLoadingText}>Searching…</Text>
+                                            </View>
+                                        ) : null}
+
+                                        {!addressSuggestLoading && addressSuggestError ? (
+                                            <View style={styles.suggestionEmptyRow}>
+                                                <Ionicons name="information-circle-outline" size={16} color="#888" />
+                                                <Text style={styles.suggestionEmptyText}>{addressSuggestError}</Text>
+                                            </View>
+                                        ) : null}
+
+                                        {addressSuggestions.map((s) => (
+                                            <TouchableOpacity
+                                                key={s.id}
+                                                activeOpacity={0.7}
+                                                onPress={() => {
+                                                    if (addressBlurTimeoutRef.current) {
+                                                        clearTimeout(addressBlurTimeoutRef.current);
+                                                        addressBlurTimeoutRef.current = null;
+                                                    }
+                                                    skipAddressSuggestUntilRefocus.current = true;
+                                                    addressReqSeq.current += 1;
+                                                    setNewShopAddress(s.label);
+                                                    setAddressSuggestions([]);
+                                                    setAddressSuggestError('');
+                                                    setAddressSuggestLoading(false);
+                                                    setAddressFieldFocused(false);
+                                                    addressInputRef.current?.blur();
+                                                    Keyboard.dismiss();
+                                                }}
+                                                style={styles.suggestionItem}
+                                            >
+                                                <Ionicons name="location-outline" size={16} color="#666" />
+                                                <Text style={styles.suggestionText} numberOfLines={2}>
+                                                    {s.label}
+                                                </Text>
+                                            </TouchableOpacity>
+                                        ))}
+                                    </View>
+                                ) : null}
+                            </View>
 
                             <Text style={styles.inputLabel}>Phone</Text>
                             <TextInput
@@ -586,13 +1009,17 @@ export default function MyShopsScreen() {
                         <TouchableOpacity
                             style={[
                                 styles.betaSubmitBtn,
-                                !betaCode.trim() && styles.betaSubmitBtnDisabled,
+                                (!betaCode.trim() || betaVerifyLoading) && styles.betaSubmitBtnDisabled,
                             ]}
                             activeOpacity={0.8}
                             onPress={handleBetaCodeSubmit}
-                            disabled={!betaCode.trim()}
+                            disabled={!betaCode.trim() || betaVerifyLoading}
                         >
-                            <Ionicons name="arrow-forward" size={20} color="#fff" />
+                            {betaVerifyLoading ? (
+                                <ActivityIndicator size="small" color="#fff" />
+                            ) : (
+                                <Ionicons name="arrow-forward" size={20} color="#fff" />
+                            )}
                             <Text style={styles.betaSubmitText}>Verify Code</Text>
                         </TouchableOpacity>
 
@@ -683,13 +1110,63 @@ const styles = StyleSheet.create({
     shopCard: {
         backgroundColor: '#fff',
         borderRadius: 16,
-        overflow: 'hidden',
+        overflow: 'visible',
         marginBottom: 14,
         shadowColor: '#000',
         shadowOffset: { width: 0, height: 2 },
         shadowOpacity: 0.08,
         shadowRadius: 6,
         elevation: 3,
+    },
+    shopCoverClip: {
+        borderTopLeftRadius: 16,
+        borderTopRightRadius: 16,
+        overflow: 'hidden',
+    },
+    shopBottomRow: {
+        flexDirection: 'row',
+        alignItems: 'flex-start',
+    },
+    shopInfoTouchable: {
+        flex: 1,
+    },
+    shopMenuModalRoot: {
+        flex: 1,
+    },
+    shopMenuDropdownModal: {
+        position: 'absolute',
+        backgroundColor: '#fff',
+        borderRadius: 12,
+        paddingVertical: 4,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.2,
+        shadowRadius: 14,
+        elevation: 16,
+        borderWidth: StyleSheet.hairlineWidth,
+        borderColor: '#e8ebf0',
+    },
+    shopMenuColumn: {
+        paddingRight: 4,
+        paddingTop: 2,
+    },
+    shopMenuBtn: {
+        paddingVertical: 10,
+        paddingHorizontal: 10,
+    },
+    shopMenuItem: {
+        paddingVertical: 12,
+        paddingHorizontal: 14,
+    },
+    shopMenuItemDanger: {
+        fontSize: 15,
+        fontWeight: '600',
+        color: '#c0392b',
+    },
+    shopMenuItemMuted: {
+        fontSize: 15,
+        fontWeight: '500',
+        color: '#666',
     },
     shopCoverContainer: {
         height: 120,
@@ -745,11 +1222,6 @@ const styles = StyleSheet.create({
         color: '#888',
         marginTop: 3,
     },
-    shopArrow: {
-        position: 'absolute',
-        right: 16,
-        bottom: 20,
-    },
 
     // Modal
     modalOverlay: {
@@ -789,6 +1261,57 @@ const styles = StyleSheet.create({
         paddingVertical: 12,
         fontSize: 15,
         color: '#2d253b',
+    },
+    suggestionBox: {
+        marginTop: 8,
+        backgroundColor: '#fff',
+        borderRadius: 12,
+        borderWidth: 1,
+        borderColor: '#e8ebf0',
+        overflow: 'hidden',
+    },
+    suggestionLoadingRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 10,
+        paddingHorizontal: 12,
+        paddingVertical: 10,
+        borderBottomWidth: 1,
+        borderBottomColor: '#f0f0f0',
+    },
+    suggestionLoadingText: {
+        fontSize: 13,
+        color: '#666',
+        fontWeight: '600',
+    },
+    suggestionEmptyRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+        paddingHorizontal: 12,
+        paddingVertical: 10,
+    },
+    suggestionEmptyText: {
+        flex: 1,
+        fontSize: 13,
+        color: '#888',
+        fontWeight: '600',
+    },
+    suggestionItem: {
+        flexDirection: 'row',
+        alignItems: 'flex-start',
+        gap: 10,
+        paddingHorizontal: 12,
+        paddingVertical: 10,
+        borderBottomWidth: 1,
+        borderBottomColor: '#f5f5f5',
+    },
+    suggestionText: {
+        flex: 1,
+        fontSize: 13,
+        color: '#2d253b',
+        fontWeight: '600',
+        lineHeight: 18,
     },
     createBtn: {
         flexDirection: 'row',

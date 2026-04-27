@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback, useImperativeHandle, forwardRef } from 'react';
+import React, { useState, useRef, useCallback, useImperativeHandle, forwardRef, useEffect } from 'react';
 import {
     View,
     Text,
@@ -362,19 +362,17 @@ const PriceRangeSlider = forwardRef(function PriceRangeSlider({ initialMin, init
     );
 });
 
-const SHOW_OPTIONS = [
-    { label: 'All', value: 'all', icon: 'apps-outline' },
-    { label: 'Shops only', value: 'shops', icon: 'storefront-outline' },
-    { label: 'Products only', value: 'products', icon: 'cube-outline' },
-];
-
 export default function FCFilterBar({ filters, onFiltersChange }) {
     const [activeModal, setActiveModal] = useState(null);
     const slideAnim = useRef(new Animated.Value(SCREEN_HEIGHT)).current;
     const backdropAnim = useRef(new Animated.Value(0)).current;
     const priceSliderRef = useRef(null);
+    const [draft, setDraft] = useState(filters);
 
     const openModal = (modalName) => {
+        // Snapshot current applied filters as a draft when opening.
+        // If the user closes without Apply, we discard draft changes.
+        setDraft(filters);
         setActiveModal(modalName);
         Animated.parallel([
             Animated.timing(slideAnim, {
@@ -408,24 +406,26 @@ export default function FCFilterBar({ filters, onFiltersChange }) {
     };
 
     const applyAndCloseModal = () => {
-        // Apply price values only when Apply is clicked
+        let next = { ...draft };
+        // Read price values only when Apply is clicked (slider is stateful).
         if (activeModal === 'price' && priceSliderRef.current) {
             const { min, max } = priceSliderRef.current.getValues();
-            onFiltersChange({
-                ...filters,
+            next = {
+                ...next,
                 priceMin: min > 0 ? min : null,
                 priceMax: max,
-            });
+            };
         }
+        onFiltersChange(next);
         closeModal();
     };
 
     const updateFilter = (key, value) => {
-        onFiltersChange({ ...filters, [key]: value });
+        setDraft((prev) => ({ ...prev, [key]: value }));
     };
 
     const toggleCategory = (cat) => {
-        const current = filters.categories || [];
+        const current = draft.categories || [];
         const exists = current.find((c) => c.id === cat.id);
         if (exists) {
             updateFilter('categories', current.filter((c) => c.id !== cat.id));
@@ -441,7 +441,6 @@ export default function FCFilterBar({ filters, onFiltersChange }) {
             priceMin: null,
             priceMax: null,
             promoOnly: false,
-            showMode: 'all',
         });
     };
 
@@ -451,7 +450,6 @@ export default function FCFilterBar({ filters, onFiltersChange }) {
         filters.distance != null,
         filters.priceMin != null || filters.priceMax != null,
         filters.promoOnly === true,
-        filters.showMode && filters.showMode !== 'all',
     ].filter(Boolean).length;
 
     // Build active chips for display
@@ -465,7 +463,10 @@ export default function FCFilterBar({ filters, onFiltersChange }) {
                 label: cat.name,
                 icon: cat.icon,
                 color: cat.color,
-                onRemove: () => toggleCategory(cat),
+                onRemove: () => {
+                    const nextCats = (filters.categories || []).filter((c) => c.id !== cat.id);
+                    onFiltersChange({ ...filters, categories: nextCats });
+                },
             });
         });
     }
@@ -477,7 +478,7 @@ export default function FCFilterBar({ filters, onFiltersChange }) {
             label: `≤ ${distLabel}`,
             icon: 'navigate-outline',
             color: '#3B82F6',
-            onRemove: () => updateFilter('distance', null),
+            onRemove: () => onFiltersChange({ ...filters, distance: null }),
         });
     }
     if (filters.priceMin != null || filters.priceMax != null) {
@@ -507,18 +508,7 @@ export default function FCFilterBar({ filters, onFiltersChange }) {
             label: 'Promos',
             icon: 'pricetag-outline',
             color: '#EF4444',
-            onRemove: () => updateFilter('promoOnly', false),
-        });
-    }
-    if (filters.showMode && filters.showMode !== 'all') {
-        const opt = SHOW_OPTIONS.find(o => o.value === filters.showMode);
-        activeChips.push({
-            key: 'show',
-            modalKey: 'show',
-            label: opt?.label || filters.showMode,
-            icon: opt?.icon || 'apps-outline',
-            color: '#8B5CF6',
-            onRemove: () => updateFilter('showMode', 'all'),
+            onRemove: () => onFiltersChange({ ...filters, promoOnly: false }),
         });
     }
 
@@ -527,8 +517,12 @@ export default function FCFilterBar({ filters, onFiltersChange }) {
         { key: 'distance', label: 'Distance', icon: 'navigate-outline', active: filters.distance != null },
         { key: 'price', label: 'Price', icon: 'cash-outline', active: filters.priceMin != null || filters.priceMax != null },
         { key: 'promo', label: 'Promos', icon: 'pricetag-outline', active: filters.promoOnly === true },
-        { key: 'show', label: 'Show', icon: 'eye-outline', active: filters.showMode && filters.showMode !== 'all' },
     ];
+
+    // Keep draft in sync if parent filters change while modal is closed.
+    useEffect(() => {
+        if (activeModal == null) setDraft(filters);
+    }, [activeModal, filters]);
 
     return (
         <>
@@ -625,7 +619,6 @@ export default function FCFilterBar({ filters, onFiltersChange }) {
                                 {activeModal === 'distance' && 'Distance'}
                                 {activeModal === 'price' && 'Price Range'}
                                 {activeModal === 'promo' && 'Promotions'}
-                                {activeModal === 'show' && 'Show'}
                             </Text>
                             <TouchableOpacity onPress={closeModal} activeOpacity={0.7}>
                                 <Ionicons name="close-circle" size={28} color="#ccc" />
@@ -637,7 +630,7 @@ export default function FCFilterBar({ filters, onFiltersChange }) {
                             <View style={styles.sheetBody}>
                                 <View style={styles.categoriesGrid}>
                                     {CATEGORIES.map((cat) => {
-                                        const isSelected = (filters.categories || []).find(c => c.id === cat.id);
+                                        const isSelected = (draft.categories || []).find(c => c.id === cat.id);
                                         return (
                                             <TouchableOpacity
                                                 key={cat.id}
@@ -670,7 +663,7 @@ export default function FCFilterBar({ filters, onFiltersChange }) {
                         {activeModal === 'distance' && (
                             <View style={styles.sheetBody}>
                                 {DISTANCE_OPTIONS.map((opt) => {
-                                    const isSelected = filters.distance === opt.value;
+                                    const isSelected = draft.distance === opt.value;
                                     return (
                                         <TouchableOpacity
                                             key={opt.value}
@@ -703,8 +696,8 @@ export default function FCFilterBar({ filters, onFiltersChange }) {
                                 </Text>
                                 <PriceRangeSlider
                                     ref={priceSliderRef}
-                                    initialMin={filters.priceMin != null ? filters.priceMin : 0}
-                                    initialMax={filters.priceMax}
+                                    initialMin={draft.priceMin != null ? draft.priceMin : 0}
+                                    initialMax={draft.priceMax}
                                 />
                             </View>
                         )}
@@ -713,16 +706,16 @@ export default function FCFilterBar({ filters, onFiltersChange }) {
                         {activeModal === 'promo' && (
                             <View style={styles.sheetBody}>
                                 <TouchableOpacity
-                                    style={[styles.promoToggle, filters.promoOnly && styles.promoToggleActive]}
-                                    onPress={() => updateFilter('promoOnly', !filters.promoOnly)}
+                                    style={[styles.promoToggle, draft.promoOnly && styles.promoToggleActive]}
+                                    onPress={() => updateFilter('promoOnly', !draft.promoOnly)}
                                     activeOpacity={0.7}
                                 >
                                     <View style={styles.promoToggleLeft}>
-                                        <View style={[styles.promoIcon, filters.promoOnly && styles.promoIconActive]}>
+                                        <View style={[styles.promoIcon, draft.promoOnly && styles.promoIconActive]}>
                                             <Ionicons
                                                 name="pricetag"
                                                 size={24}
-                                                color={filters.promoOnly ? '#fff' : '#EF4444'}
+                                                color={draft.promoOnly ? '#fff' : '#EF4444'}
                                             />
                                         </View>
                                         <View>
@@ -730,44 +723,13 @@ export default function FCFilterBar({ filters, onFiltersChange }) {
                                             <Text style={styles.promoSubtitle}>Show items with active discounts</Text>
                                         </View>
                                     </View>
-                                    <View style={[styles.toggle, filters.promoOnly && styles.toggleActive]}>
+                                    <View style={[styles.toggle, draft.promoOnly && styles.toggleActive]}>
                                         <Animated.View style={[
                                             styles.toggleDot,
-                                            filters.promoOnly && styles.toggleDotActive,
+                                            draft.promoOnly && styles.toggleDotActive,
                                         ]} />
                                     </View>
                                 </TouchableOpacity>
-                            </View>
-                        )}
-
-                        {/* SHOW MODE */}
-                        {activeModal === 'show' && (
-                            <View style={styles.sheetBody}>
-                                {SHOW_OPTIONS.map((opt) => {
-                                    const isSelected = (filters.showMode || 'all') === opt.value;
-                                    return (
-                                        <TouchableOpacity
-                                            key={opt.value}
-                                            style={[styles.showOption, isSelected && styles.showOptionActive]}
-                                            onPress={() => updateFilter('showMode', opt.value)}
-                                            activeOpacity={0.7}
-                                        >
-                                            <View style={[styles.showOptionIcon, isSelected && styles.showOptionIconActive]}>
-                                                <Ionicons
-                                                    name={opt.icon}
-                                                    size={24}
-                                                    color={isSelected ? '#fff' : '#666'}
-                                                />
-                                            </View>
-                                            <Text style={[styles.showOptionText, isSelected && styles.showOptionTextActive]}>
-                                                {opt.label}
-                                            </Text>
-                                            {isSelected && (
-                                                <Ionicons name="checkmark-circle" size={22} color="#8B5CF6" />
-                                            )}
-                                        </TouchableOpacity>
-                                    );
-                                })}
                             </View>
                         )}
 

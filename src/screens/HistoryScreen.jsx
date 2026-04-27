@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
     View,
     Text,
@@ -6,36 +6,24 @@ import {
     ScrollView,
     TouchableOpacity,
     StatusBar,
+    Modal,
+    ActivityIndicator,
+    Alert,
+    Image,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useNavigation } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { useSettings } from '../context/SettingsContext';
-
-// ── Simulated history data ──────────────────────────────────────────
-
-export const HISTORY_DATA = [
-    // Visits
-    { id: 'v1', type: 'visit', shopName: 'Apple Store', address: 'Shay St 39, Tel Aviv', date: '2026-03-10', time: '14:05', category: 'Tech', matchingProduct: { name: 'iPhone 16 Pro', price: 4999, discount: '10%' } },
-    { id: 'v2', type: 'visit', shopName: 'Mega Sport', address: 'Shay Agnon St, Ashkelon', date: '2026-03-10', time: '11:30', category: 'Shopping', matchingProduct: null },
-    { id: 'v3', type: 'visit', shopName: 'Fox', address: 'Shay Agnon St, Ashkelon', date: '2026-03-09', time: '17:20', category: 'Shopping', matchingProduct: { name: 'Winter Jacket', price: 299, discount: '25%' } },
-    { id: 'v4', type: 'visit', shopName: "Yitzhak's Grocery", address: 'Shay Agnon St 5, Ashkelon', date: '2026-03-08', time: '10:15', category: 'Restaurants', matchingProduct: null },
-    { id: 'v5', type: 'visit', shopName: 'Studio Pasha', address: 'Shay Agnon St, Ashkelon', date: '2026-03-07', time: '09:00', category: 'Shopping', matchingProduct: null },
-    { id: 'v6', type: 'visit', shopName: 'Lee Cooper Kids', address: 'Shay Agnon St, Ashkelon', date: '2026-03-05', time: '15:45', category: 'Shopping', matchingProduct: { name: 'Kids Sneakers', price: 189, discount: '15%' } },
-    { id: 'v7', type: 'visit', shopName: 'Mania Jeans', address: 'Shay Agnon St, Ashkelon', date: '2026-03-03', time: '13:10', category: 'Shopping', matchingProduct: null },
-
-    // Cashbacks (each linked to a payment)
-    { id: 'c1', type: 'cashback', shopName: 'Apple Store', amount: 25.00, date: '2026-03-10', time: '14:10', payment: { amount: 4999, method: 'Credit Card', last4: '4821' } },
-    { id: 'c2', type: 'cashback', shopName: 'Fox', amount: 8.50, date: '2026-03-09', time: '17:35', payment: { amount: 299, method: 'Credit Card', last4: '4821' } },
-    { id: 'c3', type: 'cashback', shopName: 'Mega Sport', amount: 12.00, date: '2026-03-07', time: '12:00', payment: { amount: 480, method: 'Debit Card', last4: '7733' } },
-    { id: 'c4', type: 'cashback', shopName: 'Lee Cooper Kids', amount: 5.60, date: '2026-03-05', time: '16:00', payment: { amount: 189, method: 'Credit Card', last4: '4821' } },
-    { id: 'c5', type: 'cashback', shopName: "Yitzhak's Grocery", amount: 3.20, date: '2026-03-03', time: '10:30', payment: { amount: 64, method: 'Apple Pay', last4: '4821' } },
-];
+import { supabase } from '../lib/supabaseClient';
+import { getOrCreateOwnerUuid } from '../lib/ownerUuid';
 
 // ── Filters ─────────────────────────────────────────────────────────
 
 const FILTERS = [
     { key: 'all', label: 'All', icon: 'list-outline' },
     { key: 'cashback', label: 'Cashbacks', icon: 'cash-outline' },
+    { key: 'purchase', label: 'Purchases', icon: 'card-outline' },
+    { key: 'adjustment', label: 'Adjustments', icon: 'swap-horizontal-outline' },
     { key: 'visit', label: 'Visits', icon: 'storefront-outline' },
 ];
 
@@ -93,6 +81,25 @@ function groupByDay(items) {
     }));
 }
 
+function occurredAtToDateTime(occurredAt) {
+    if (!occurredAt) return { date: null, time: null };
+    const d = new Date(occurredAt);
+    if (Number.isNaN(d.getTime())) return { date: null, time: null };
+    const date = d.toISOString().slice(0, 10);
+    const time = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+    return { date, time };
+}
+
+function formatMoney(value, currency) {
+    if (value == null || value === '') return '';
+    return `${Number(value).toFixed(2)} ${currency || ''}`.trim();
+}
+
+function safeNumber(x) {
+    const n = typeof x === 'string' && x.trim() !== '' ? Number(x) : typeof x === 'number' ? x : Number(x);
+    return Number.isFinite(n) ? n : null;
+}
+
 // ── Visit Card ──────────────────────────────────────────────────────
 
 function VisitCard({ item }) {
@@ -103,7 +110,17 @@ function VisitCard({ item }) {
     return (
         <TouchableOpacity
             activeOpacity={0.85}
-            onPress={() => navigation.navigate('ShopScreen', { shop: { name: item.shopName, adress: item.address } })}
+            onPress={() =>
+                navigation.navigate('ShopScreen', {
+                    shop: {
+                        id: item.shopId,
+                        name: item.shopName,
+                        adress: item.address,
+                        address: item.address,
+                        category: item.category,
+                    },
+                })
+            }
             style={styles.card}
         >
             <View style={[styles.cardIconContainer, { backgroundColor: catColor + '15', borderColor: catColor + '30' }]}>
@@ -129,33 +146,12 @@ function VisitCard({ item }) {
     );
 }
 
-// ── Matching Product sub-card ───────────────────────────────────────
-
-function MatchingProductCard({ product }) {
-    const { getCurrencySymbol } = useSettings();
-    const currencySymbol = getCurrencySymbol();
-    return (
-        <View style={styles.subCard}>
-            <View style={styles.subCardConnector}>
-                <View style={styles.connectorLine} />
-                <View style={styles.connectorDot} />
-            </View>
-            <View style={[styles.subCardIconContainer, { backgroundColor: '#F59E0B15', borderColor: '#F59E0B30' }]}>
-                <Ionicons name="pricetag-outline" size={16} color="#F59E0B" />
-            </View>
-            <View style={styles.subCardInfo}>
-                <Text style={styles.subCardTitle} numberOfLines={1}>Matching: {product.name}</Text>
-                <Text style={styles.subCardDetail}>{product.price} {currencySymbol} · {product.discount} off</Text>
-            </View>
-        </View>
-    );
-}
-
 // ── Cashback Card ───────────────────────────────────────────────────
 
 function CashbackCard({ item }) {
     const { getCurrencySymbol } = useSettings();
     const currencySymbol = getCurrencySymbol();
+    const displayCurrency = item.currency || currencySymbol;
     return (
         <View style={styles.card}>
             <View style={[styles.cardIconContainer, { backgroundColor: '#10B98115', borderColor: '#10B98130' }]}>
@@ -163,7 +159,7 @@ function CashbackCard({ item }) {
             </View>
             <View style={styles.cardInfo}>
                 <Text style={styles.cardTitle} numberOfLines={1}>{item.shopName}</Text>
-                <Text style={[styles.cashbackAmount, { color: '#10B981' }]}>+{item.amount.toFixed(2)} {currencySymbol}</Text>
+                <Text style={[styles.cashbackAmount, { color: '#10B981' }]}>+{item.amount.toFixed(2)} {displayCurrency}</Text>
             </View>
             <View style={styles.cardRight}>
                 <Text style={styles.cardTime}>{item.time}</Text>
@@ -172,23 +168,107 @@ function CashbackCard({ item }) {
     );
 }
 
-// ── Payment sub-card ────────────────────────────────────────────────
-
-function PaymentSubCard({ payment }) {
+function PaymentDetails({ meta, currency, onPress }) {
     const { getCurrencySymbol } = useSettings();
     const currencySymbol = getCurrencySymbol();
+    const displayCurrency = currency || currencySymbol;
+
+    if (!meta || typeof meta !== 'object') return null;
+
+    const method = meta.payment_method;
+    const last4 = meta.last4;
+    const walletUsed = meta.cashback_used_amount != null ? Number(meta.cashback_used_amount) : meta.wallet_used_amount != null ? Number(meta.wallet_used_amount) : null;
+
+    const hasAny =
+        (method && String(method).length > 0) ||
+        (last4 && String(last4).length > 0) ||
+        Number.isFinite(walletUsed);
+
+    if (!hasAny) return null;
+
+    const methodLabel =
+        method && last4 ? `${method} ···${last4}` : method ? String(method) : last4 ? `···${last4}` : 'Payment';
+
+    const lines = [];
+    if (Number.isFinite(walletUsed) && walletUsed !== 0) lines.push(`Used cashback/wallet: ${walletUsed.toFixed(2)} ${displayCurrency}`);
+
     return (
-        <View style={styles.subCard}>
-            <View style={styles.subCardConnector}>
-                <View style={styles.connectorLine} />
-                <View style={styles.connectorDot} />
+        <TouchableOpacity activeOpacity={0.8} onPress={onPress} style={styles.detailBox}>
+            <View style={styles.detailRow}>
+                <Ionicons name="receipt-outline" size={16} color="#64748b" />
+                <Text style={styles.detailTitle} numberOfLines={1}>{methodLabel}</Text>
+                <Ionicons name="chevron-forward" size={16} color="#cbd5e1" />
             </View>
-            <View style={[styles.subCardIconContainer, { backgroundColor: '#6366F115', borderColor: '#6366F130' }]}>
-                <Ionicons name="card-outline" size={16} color="#6366F1" />
+            {lines.map((t) => (
+                <Text key={t} style={styles.detailLine}>{t}</Text>
+            ))}
+            <Text style={styles.detailHint}>Tap to view details</Text>
+        </TouchableOpacity>
+    );
+}
+
+function PurchaseCard({ item }) {
+    const { getCurrencySymbol } = useSettings();
+    const currencySymbol = getCurrencySymbol();
+    const displayCurrency = item.currency || currencySymbol;
+    const abs = Math.abs(item.amount || 0);
+    const cashbackUsed = safeNumber(item?.meta?.cashback_used_amount ?? item?.meta?.wallet_used_amount) || 0;
+    const items = Array.isArray(item?.meta?.items) ? item.meta.items : [];
+    const totalItems = items.length
+        ? items.reduce((s, it) => {
+            const qty = safeNumber(it?.quantity ?? it?.qty) || 1;
+            const unit = safeNumber(it?.unit_price ?? it?.unitPrice) || 0;
+            const disc = safeNumber(it?.unit_discount_price ?? it?.discount_price ?? it?.discountPrice);
+            const effective = disc != null ? disc : unit;
+            return s + qty * effective;
+        }, 0)
+        : null;
+
+    const derivedExternal = totalItems != null && (item?.meta?.payment_method || item?.meta?.payment_method === 'none')
+        ? item.meta.payment_method === 'none'
+            ? 0
+            : Math.max(totalItems - cashbackUsed, 0)
+        : null;
+
+    const displayAmount = derivedExternal != null ? derivedExternal : abs;
+    return (
+        <>
+            <View style={styles.card}>
+                <View style={[styles.cardIconContainer, { backgroundColor: '#6366F115', borderColor: '#6366F130' }]}>
+                    <Ionicons name="card-outline" size={22} color="#6366F1" />
+                </View>
+                <View style={styles.cardInfo}>
+                    <Text style={styles.cardTitle} numberOfLines={1}>{item.shopName}</Text>
+                    <Text style={[styles.cashbackAmount, { color: '#6366F1' }]}>-{displayAmount.toFixed(2)} {displayCurrency}</Text>
+                </View>
+                <View style={styles.cardRight}>
+                    <Text style={styles.cardTime}>{item.time}</Text>
+                </View>
             </View>
-            <View style={styles.subCardInfo}>
-                <Text style={styles.subCardTitle} numberOfLines={1}>{payment.method} ···{payment.last4}</Text>
-                <Text style={styles.subCardDetail}>Paid {payment.amount.toFixed(2)} {currencySymbol}</Text>
+            <PaymentDetails meta={item.meta} currency={item.currency} onPress={item.onOpenDetails} />
+        </>
+    );
+}
+
+function AdjustmentCard({ item }) {
+    const { getCurrencySymbol } = useSettings();
+    const currencySymbol = getCurrencySymbol();
+    const displayCurrency = item.currency || currencySymbol;
+    const isPositive = (item.amount || 0) >= 0;
+    const color = isPositive ? '#1ba5b8' : '#ef4444';
+    const prefix = isPositive ? '+' : '-';
+    const abs = Math.abs(item.amount || 0);
+    return (
+        <View style={styles.card}>
+            <View style={[styles.cardIconContainer, { backgroundColor: color + '15', borderColor: color + '30' }]}>
+                <Ionicons name="swap-horizontal-outline" size={22} color={color} />
+            </View>
+            <View style={styles.cardInfo}>
+                <Text style={styles.cardTitle} numberOfLines={1}>{item.shopName || 'Adjustment'}</Text>
+                <Text style={[styles.cashbackAmount, { color }]}>{prefix}{abs.toFixed(2)} {displayCurrency}</Text>
+            </View>
+            <View style={styles.cardRight}>
+                <Text style={styles.cardTime}>{item.time}</Text>
             </View>
         </View>
     );
@@ -199,17 +279,208 @@ function PaymentSubCard({ payment }) {
 export default function HistoryScreen() {
     const navigation = useNavigation();
     const [activeFilter, setActiveFilter] = useState('all');
+    const [loading, setLoading] = useState(true);
+    const [historyRows, setHistoryRows] = useState([]);
+    const [ownerUuid, setOwnerUuid] = useState(null);
+
+    const [receiptVisible, setReceiptVisible] = useState(false);
+    const [receiptLoading, setReceiptLoading] = useState(false);
+    const [receiptError, setReceiptError] = useState(null);
+    const [selectedPurchase, setSelectedPurchase] = useState(null);
+    const [receipt, setReceipt] = useState(null);
+    const [receiptProductsById, setReceiptProductsById] = useState({});
+
+    const closeReceipt = useCallback(() => {
+        setReceiptVisible(false);
+        setReceiptLoading(false);
+        setReceiptError(null);
+        setSelectedPurchase(null);
+        setReceipt(null);
+        setReceiptProductsById({});
+    }, []);
+
+    const openReceipt = useCallback(
+        async (purchaseItem) => {
+            if (!purchaseItem?.transactionId) {
+                Alert.alert('Details unavailable', 'Missing transaction id for this purchase.');
+                return;
+            }
+
+            try {
+                const owner = ownerUuid || (await getOrCreateOwnerUuid());
+                setOwnerUuid(owner);
+                setSelectedPurchase(purchaseItem);
+                setReceiptVisible(true);
+                setReceiptLoading(true);
+                setReceiptError(null);
+                setReceipt(null);
+
+                // Prefer clean receipt (computed totals from meta.items). Fallback to legacy snapshot.
+                const { data: vClean, error: vCleanErr } = await supabase.rpc('get_wallet_transaction_receipt_clean', {
+                    p_owner: owner,
+                    p_transaction_id: purchaseItem.transactionId,
+                });
+                if (!vCleanErr && vClean) {
+                    setReceipt(vClean);
+                    const items = Array.isArray(vClean?.items) ? vClean.items : [];
+                    const ids = Array.from(
+                        new Set(
+                            items
+                                .map((it) => it?.product_id || it?.productId || null)
+                                .filter(Boolean)
+                        )
+                    );
+                    if (ids.length > 0) {
+                        const { data: prods, error: pErr } = await supabase
+                            .from('products')
+                            .select('id,name,image_urls,currency')
+                            .in('id', ids);
+                        if (!pErr && Array.isArray(prods)) {
+                            const map = {};
+                            for (const p of prods) map[p.id] = p;
+                            setReceiptProductsById(map);
+                        }
+                    }
+                } else {
+                    const { data: v1, error: v1Err } = await supabase.rpc('get_wallet_transaction_receipt', {
+                        p_owner: owner,
+                        p_transaction_id: purchaseItem.transactionId,
+                    });
+                    if (v1Err) throw v1Err;
+                    setReceipt(v1 || null);
+                }
+            } catch (e) {
+                console.error('[HistoryScreen] openReceipt failed', e);
+                setReceiptError('Failed to load purchase details.');
+            } finally {
+                setReceiptLoading(false);
+            }
+        },
+        [ownerUuid]
+    );
+
+    const openProductFromReceipt = useCallback(
+        async (productId) => {
+            if (!productId) return;
+            try {
+                const { data: row, error } = await supabase
+                    .from('products')
+                    .select('id,name,description,price,discount_price,currency,image_urls,in_stock,shop_id')
+                    .eq('id', productId)
+                    .maybeSingle();
+                if (error) throw error;
+
+                if (!row?.id) {
+                    Alert.alert('Product not available', 'This product no longer exists.');
+                    return;
+                }
+
+                const currency = row.currency || selectedPurchase?.currency || 'EUR';
+                const priceLabel = row.price != null ? `${Number(row.price)} ${currency}` : '';
+                const discountLabel =
+                    row.discount_price != null ? `${Number(row.discount_price)} ${currency}` : null;
+
+                const payload = {
+                    ...row,
+                    id: row.id,
+                    name: row.name,
+                    description: row.description || '',
+                    price: priceLabel,
+                    discountPrice: discountLabel,
+                    store_infos: selectedPurchase?.shopName || '',
+                    store_address: selectedPurchase?.address || '',
+                    distance: '-- m',
+                    inStock: row.in_stock !== false,
+                };
+
+                closeReceipt();
+                navigation.push('ProductScreen', {
+                    product: payload,
+                    shopId: row.shop_id || selectedPurchase?.shopId || null,
+                    productRow: row,
+                });
+            } catch (e) {
+                console.error('[HistoryScreen] openProductFromReceipt failed', e);
+                Alert.alert('Error', 'Failed to open product.');
+            }
+        },
+        [closeReceipt, navigation, selectedPurchase]
+    );
+
+    const fetchHistory = useCallback(async () => {
+        setLoading(true);
+        try {
+            const ownerUuid = await getOrCreateOwnerUuid();
+            setOwnerUuid(ownerUuid);
+            const { data, error } = await supabase.rpc('get_owner_profile', {
+                p_owner: ownerUuid,
+                p_history_limit: 250,
+            });
+            if (error) throw error;
+
+            const rows = Array.isArray(data?.history) ? data.history : [];
+            const mapped = rows
+                .map((r, idx) => {
+                    const { date, time } = occurredAtToDateTime(r?.occurred_at);
+                    return {
+                        id: r?.occurred_at ? `${r.type}-${r.occurred_at}-${idx}` : `${r?.type ?? 'row'}-${idx}`,
+                        type: r?.type ?? 'unknown',
+                        date: date ?? '1970-01-01',
+                        time: time ?? '--:--',
+                        shopId: r?.shop_id ?? null,
+                        shopName: r?.shop_name ?? '',
+                        address: r?.shop_address ?? '',
+                        category: r?.shop_category ?? null,
+                        amount: r?.amount != null ? Number(r.amount) : 0,
+                        currency: r?.currency ?? null,
+                        meta: r?.meta ?? null,
+                        transactionId: r?.transaction_id ?? null,
+                    };
+                })
+                .filter((x) => x.type === 'visit' || x.type === 'cashback' || x.type === 'purchase' || x.type === 'adjustment');
+
+            const withHandlers = mapped.map((item) => {
+                if (item.type !== 'purchase') return item;
+                return {
+                    ...item,
+                    onOpenDetails: () => openReceipt(item),
+                };
+            });
+
+            setHistoryRows(withHandlers);
+        } catch (e) {
+            console.error('[HistoryScreen] fetch history failed', e);
+            setHistoryRows([]);
+        } finally {
+            setLoading(false);
+        }
+    }, []);
+
+    useFocusEffect(
+        useCallback(() => {
+            fetchHistory();
+        }, [fetchHistory])
+    );
 
     const filteredData = useMemo(() => {
-        if (activeFilter === 'all') return HISTORY_DATA;
-        return HISTORY_DATA.filter((item) => item.type === activeFilter);
-    }, [activeFilter]);
+        if (activeFilter === 'all') return historyRows;
+        return historyRows.filter((item) => item.type === activeFilter);
+    }, [activeFilter, historyRows]);
 
     const grouped = useMemo(() => groupByDay(filteredData), [filteredData]);
 
-    const totalCashback = HISTORY_DATA
+    const totalCashback = historyRows
         .filter((i) => i.type === 'cashback')
-        .reduce((sum, i) => sum + i.amount, 0);
+        .reduce((sum, i) => sum + (i.amount || 0), 0);
+
+    const receiptTx = receipt?.transaction ?? null;
+    const receiptItems = Array.isArray(receipt?.items) ? receipt.items : [];
+    const receiptTotals = receipt?.computed_totals ?? null;
+
+    const totalExternalFromPayments = useMemo(() => {
+        if (receiptTotals?.total_external != null) return Number(receiptTotals.total_external);
+        return null;
+    }, [receiptTotals]);
 
     return (
         <View style={styles.container}>
@@ -229,7 +500,12 @@ export default function HistoryScreen() {
             </View>
 
             {/* Filter chips */}
-            <View style={styles.filterRow}>
+            <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                style={styles.filterScroll}
+                contentContainerStyle={styles.filterRow}
+            >
                 {FILTERS.map((f) => {
                     const isActive = activeFilter === f.key;
                     return (
@@ -250,13 +526,13 @@ export default function HistoryScreen() {
                         </TouchableOpacity>
                     );
                 })}
-            </View>
+            </ScrollView>
 
             {/* Summary bar */}
             <View style={styles.summaryBar}>
                 <View style={styles.summaryItem}>
                     <Ionicons name="storefront-outline" size={18} color="#2d253b" />
-                    <Text style={styles.summaryValue}>{HISTORY_DATA.filter((i) => i.type === 'visit').length}</Text>
+                    <Text style={styles.summaryValue}>{historyRows.filter((i) => i.type === 'visit').length}</Text>
                     <Text style={styles.summaryLabel}>visits</Text>
                 </View>
                 <View style={styles.summaryDivider} />
@@ -273,6 +549,18 @@ export default function HistoryScreen() {
                 contentContainerStyle={styles.scrollContent}
                 showsVerticalScrollIndicator={false}
             >
+                {loading && (
+                    <View style={styles.loadingBox}>
+                        <Text style={styles.loadingText}>Loading history…</Text>
+                    </View>
+                )}
+
+                {!loading && grouped.length === 0 && (
+                    <View style={styles.loadingBox}>
+                        <Text style={styles.loadingText}>No history yet.</Text>
+                    </View>
+                )}
+
                 {grouped.map((group) => (
                     <View key={group.date} style={styles.dayGroup}>
                         {/* Day separator */}
@@ -294,18 +582,18 @@ export default function HistoryScreen() {
                                 {item.type === 'visit' && (
                                     <>
                                         <VisitCard item={item} />
-                                        {item.matchingProduct && (
-                                            <MatchingProductCard product={item.matchingProduct} />
-                                        )}
                                     </>
                                 )}
                                 {item.type === 'cashback' && (
                                     <>
                                         <CashbackCard item={item} />
-                                        {item.payment && (
-                                            <PaymentSubCard payment={item.payment} />
-                                        )}
                                     </>
+                                )}
+                                {item.type === 'purchase' && (
+                                    <PurchaseCard item={item} />
+                                )}
+                                {item.type === 'adjustment' && (
+                                    <AdjustmentCard item={item} />
                                 )}
                             </View>
                         ))}
@@ -313,6 +601,134 @@ export default function HistoryScreen() {
                 ))}
                 <View style={{ height: 30 }} />
             </ScrollView>
+
+            <Modal
+                visible={receiptVisible}
+                transparent
+                animationType="slide"
+                onRequestClose={closeReceipt}
+            >
+                <View style={styles.modalOverlay}>
+                    <TouchableOpacity style={styles.modalBackdrop} activeOpacity={1} onPress={closeReceipt} />
+                    <View style={styles.modalCard}>
+                        <View style={styles.modalHeader}>
+                            <Text style={styles.modalTitle} numberOfLines={1}>
+                                {selectedPurchase?.shopName || 'Purchase details'}
+                            </Text>
+                            <TouchableOpacity activeOpacity={0.75} onPress={closeReceipt}>
+                                <Ionicons name="close" size={22} color="#2d253b" />
+                            </TouchableOpacity>
+                        </View>
+
+                        {receiptLoading ? (
+                            <View style={{ paddingVertical: 20, alignItems: 'center', gap: 10 }}>
+                                <ActivityIndicator size="small" color="#2d253b" />
+                                <Text style={styles.modalTextMuted}>Loading…</Text>
+                            </View>
+                        ) : receiptError ? (
+                            <View style={{ paddingVertical: 10 }}>
+                                <Text style={styles.modalTextStrong}>{receiptError}</Text>
+                            </View>
+                        ) : !receiptTx ? (
+                            <View style={{ paddingVertical: 10 }}>
+                                <Text style={styles.modalTextStrong}>Details unavailable</Text>
+                                <Text style={styles.modalTextMuted}>This purchase has no receipt snapshot.</Text>
+                            </View>
+                        ) : (
+                            <ScrollView showsVerticalScrollIndicator={false}>
+                                <View style={styles.modalSection}>
+                                    <Text style={styles.modalSectionTitle}>Payment</Text>
+                                    <Text style={styles.modalText}>
+                                        Total: {formatMoney(
+                                            totalExternalFromPayments != null
+                                                ? totalExternalFromPayments
+                                                : receiptTx?.meta?.external_paid_amount != null
+                                                    ? receiptTx.meta.external_paid_amount
+                                                    : Math.abs(Number(receiptTx.amount || 0)),
+                                            receiptTx.currency
+                                        )}
+                                    </Text>
+                                    {receiptTx?.meta?.payment_method ? (
+                                        <Text style={styles.modalText}>
+                                            Method: {String(receiptTx.meta.payment_method)}
+                                            {receiptTx?.meta?.last4 ? ` ···${receiptTx.meta.last4}` : ''}
+                                        </Text>
+                                    ) : null}
+                                    {receiptTx?.meta?.cashback_used_amount != null && Number(receiptTx.meta.cashback_used_amount) !== 0 ? (
+                                        <Text style={styles.modalText}>
+                                            Used cashback/wallet: {formatMoney(receiptTx.meta.cashback_used_amount, receiptTx.currency)}
+                                        </Text>
+                                    ) : receiptTx?.meta?.wallet_used_amount != null && Number(receiptTx.meta.wallet_used_amount) !== 0 ? (
+                                        <Text style={styles.modalText}>
+                                            Used cashback/wallet: {formatMoney(receiptTx.meta.wallet_used_amount, receiptTx.currency)}
+                                        </Text>
+                                    ) : null}
+                                </View>
+
+                                <View style={styles.modalSection}>
+                                    <Text style={styles.modalSectionTitle}>Items</Text>
+                                    {receiptItems.length === 0 ? (
+                                        <Text style={styles.modalTextMuted}>No item snapshot available.</Text>
+                                    ) : (
+                                        receiptItems.map((it, idx) => {
+                                            const pid = it?.product_id || it?.productId || it?.item_id || null;
+                                            const product = pid ? receiptProductsById?.[pid] : null;
+                                            const name = product?.name || it?.name || 'Item';
+                                            const qty = safeNumber(it?.quantity ?? it?.qty) || 1;
+                                            const currency =
+                                                it?.currency || product?.currency || receiptTx.currency || selectedPurchase?.currency || 'EUR';
+                                            const unit = safeNumber(it?.unit_price ?? it?.unitPrice ?? it?.unit_price);
+                                            const discount = safeNumber(it?.unit_discount_price ?? it?.unitDiscountPrice ?? it?.discount_price ?? it?.discountPrice);
+                                            const effectiveUnit = discount != null ? discount : unit;
+                                            const showOld = unit != null && effectiveUnit != null && discount != null && effectiveUnit < unit;
+                                            const imgUrls = product?.image_urls;
+                                            const thumb =
+                                                Array.isArray(imgUrls) && imgUrls.length > 0
+                                                    ? imgUrls[0]
+                                                    : imgUrls && typeof imgUrls === 'object' && Array.isArray(imgUrls?.urls) && imgUrls.urls.length > 0
+                                                        ? imgUrls.urls[0]
+                                                        : null;
+
+                                            return (
+                                                <TouchableOpacity
+                                                    key={`${pid || idx}`}
+                                                    activeOpacity={0.85}
+                                                    onPress={() => openProductFromReceipt(pid)}
+                                                    style={styles.itemRow}
+                                                >
+                                                    {thumb ? (
+                                                        <Image source={{ uri: thumb }} style={styles.itemThumb} />
+                                                    ) : (
+                                                        <View style={styles.itemThumbPlaceholder}>
+                                                            <Ionicons name="image-outline" size={18} color="#94a3b8" />
+                                                        </View>
+                                                    )}
+                                                    <View style={{ flex: 1 }}>
+                                                        <Text style={styles.itemName} numberOfLines={1}>{name}</Text>
+                                                        <Text style={styles.itemMeta} numberOfLines={1}>
+                                                            {qty > 1 ? `x${qty}` : 'x1'}
+                                                        </Text>
+                                                    </View>
+                                                    <View style={{ alignItems: 'flex-end' }}>
+                                                        {showOld ? (
+                                                            <Text style={styles.itemOldPrice}>{formatMoney((unit ?? 0) * qty, currency)}</Text>
+                                                        ) : null}
+                                                        <Text style={styles.itemPrice}>
+                                                            {effectiveUnit != null ? formatMoney(effectiveUnit * qty, currency) : ''}
+                                                        </Text>
+                                                        {showOld ? <Text style={styles.itemDiscountBadge}>DISCOUNT</Text> : null}
+                                                    </View>
+                                                </TouchableOpacity>
+                                            );
+                                        })
+                                    )}
+                                </View>
+                                <View style={{ height: 24 }} />
+                            </ScrollView>
+                        )}
+                    </View>
+                </View>
+            </Modal>
         </View>
     );
 }
@@ -354,28 +770,31 @@ const styles = StyleSheet.create({
     },
 
     // Filters
+    filterScroll: {
+        flexGrow: 0,
+        flexShrink: 1,
+    },
     filterRow: {
-        flexDirection: 'row',
         paddingHorizontal: 16,
-        paddingTop: 14,
-        paddingBottom: 4,
-        gap: 10,
+        paddingVertical: 6,
+        gap: 8,
+        alignItems: 'center',
     },
     filterChip: {
         flexDirection: 'row',
         alignItems: 'center',
         gap: 6,
-        paddingHorizontal: 14,
-        paddingVertical: 8,
-        borderRadius: 20,
+        paddingHorizontal: 10,
+        paddingVertical: 4,
+        borderRadius: 16,
         backgroundColor: '#e8ebf0',
     },
     filterChipActive: {
         backgroundColor: '#2d253b',
     },
     filterChipText: {
-        fontSize: 13,
-        fontWeight: '600',
+        fontSize: 12,
+        fontWeight: '700',
         color: '#2d253b',
     },
     filterChipTextActive: {
@@ -418,6 +837,15 @@ const styles = StyleSheet.create({
     },
     scrollContent: {
         paddingHorizontal: 16,
+    },
+    loadingBox: {
+        paddingVertical: 24,
+        alignItems: 'center',
+    },
+    loadingText: {
+        fontSize: 14,
+        color: '#9aa3af',
+        fontWeight: '600',
     },
 
     // Day Group
@@ -537,58 +965,154 @@ const styles = StyleSheet.create({
         color: '#b0b0b0',
     },
 
-    // Sub-card (payment / matching product)
-    subCard: {
-        flexDirection: 'row',
-        alignItems: 'center',
+    detailBox: {
         backgroundColor: '#f9fafb',
         borderRadius: 12,
-        padding: 10,
+        paddingVertical: 10,
+        paddingHorizontal: 12,
         marginBottom: 10,
         marginLeft: 24,
         marginTop: 0,
         borderWidth: 1,
         borderColor: '#eef0f3',
     },
-    subCardConnector: {
-        position: 'absolute',
-        left: -13,
-        top: -4,
-        bottom: '50%',
-        width: 14,
+    detailRow: {
+        flexDirection: 'row',
         alignItems: 'center',
+        gap: 6,
     },
-    connectorLine: {
-        width: 1.5,
-        height: 14,
-        backgroundColor: '#dde0e5',
+    detailTitle: {
+        flex: 1,
+        fontSize: 13,
+        fontWeight: '700',
+        color: '#475569',
     },
-    connectorDot: {
-        width: 6,
-        height: 6,
-        borderRadius: 3,
-        backgroundColor: '#ccc',
+    detailLine: {
+        marginTop: 4,
+        fontSize: 12,
+        color: '#64748b',
+        fontWeight: '600',
     },
-    subCardIconContainer: {
-        width: 34,
-        height: 34,
-        borderRadius: 10,
-        justifyContent: 'center',
-        alignItems: 'center',
-        marginRight: 10,
-        borderWidth: 1,
+    detailHint: {
+        marginTop: 6,
+        fontSize: 11,
+        color: '#94a3b8',
+        fontWeight: '700',
     },
-    subCardInfo: {
+
+    modalOverlay: {
+        flex: 1,
+        backgroundColor: 'rgba(0,0,0,0.55)',
+        justifyContent: 'flex-end',
+    },
+    modalBackdrop: {
         flex: 1,
     },
-    subCardTitle: {
-        fontSize: 13,
-        fontWeight: '600',
-        color: '#444',
+    modalCard: {
+        backgroundColor: '#fff',
+        borderTopLeftRadius: 24,
+        borderTopRightRadius: 24,
+        padding: 16,
+        maxHeight: '82%',
     },
-    subCardDetail: {
-        fontSize: 11,
-        color: '#999',
-        marginTop: 1,
+    modalHeader: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        marginBottom: 10,
+    },
+    modalTitle: {
+        fontSize: 18,
+        fontWeight: '800',
+        color: '#2d253b',
+    },
+    modalSection: {
+        marginTop: 12,
+        paddingTop: 12,
+        borderTopWidth: 1,
+        borderTopColor: '#eef0f3',
+    },
+    modalSectionTitle: {
+        fontSize: 12,
+        fontWeight: '800',
+        color: '#94a3b8',
+        textTransform: 'uppercase',
+        letterSpacing: 0.6,
+        marginBottom: 6,
+    },
+    modalText: {
+        fontSize: 14,
+        color: '#334155',
+        fontWeight: '600',
+        marginTop: 2,
+    },
+    modalTextStrong: {
+        fontSize: 15,
+        color: '#0f172a',
+        fontWeight: '800',
+        marginTop: 2,
+    },
+    modalTextMuted: {
+        fontSize: 13,
+        color: '#94a3b8',
+        fontWeight: '600',
+        marginTop: 2,
+    },
+    itemRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 10,
+        backgroundColor: '#f9fafb',
+        borderRadius: 12,
+        padding: 12,
+        borderWidth: 1,
+        borderColor: '#eef0f3',
+        marginTop: 8,
+    },
+    itemThumb: {
+        width: 40,
+        height: 40,
+        borderRadius: 10,
+        backgroundColor: '#eef2f7',
+    },
+    itemThumbPlaceholder: {
+        width: 40,
+        height: 40,
+        borderRadius: 10,
+        backgroundColor: '#eef2f7',
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderWidth: 1,
+        borderColor: '#e2e8f0',
+    },
+    itemName: {
+        fontSize: 14,
+        fontWeight: '800',
+        color: '#0f172a',
+    },
+    itemMeta: {
+        marginTop: 2,
+        fontSize: 12,
+        fontWeight: '600',
+        color: '#94a3b8',
+    },
+    itemPrice: {
+        fontSize: 14,
+        fontWeight: '900',
+        color: '#0f172a',
+    },
+    itemOldPrice: {
+        fontSize: 12,
+        fontWeight: '700',
+        color: '#ef4444',
+        textDecorationLine: 'line-through',
+    },
+    itemDiscountBadge: {
+        marginTop: 4,
+        fontSize: 10,
+        fontWeight: '900',
+        color: '#ef4444',
+        textTransform: 'uppercase',
+        letterSpacing: 0.6,
     },
 });

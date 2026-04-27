@@ -13,7 +13,6 @@ import {
     useSettings,
     LANGUAGES,
     DISTANCE_UNITS,
-    CURRENCIES,
 } from '../context/SettingsContext';
 
 function OptionCard({ title, icon, iconColor, children }) {
@@ -82,8 +81,6 @@ export default function SettingsScreen() {
         setLanguage,
         distanceUnit,
         setDistanceUnit,
-        currency,
-        setCurrency,
     } = useSettings();
 
     return (
@@ -130,19 +127,6 @@ export default function SettingsScreen() {
                             label={unit.label}
                             selected={distanceUnit === unit.code}
                             onPress={() => setDistanceUnit(unit.code)}
-                        />
-                    ))}
-                </OptionCard>
-
-                {/* Currency */}
-                <OptionCard title="Currency" icon="cash-outline" iconColor="#10B981">
-                    {CURRENCIES.map((cur) => (
-                        <SelectableOption
-                            key={cur.code}
-                            label={`${cur.flag}  ${cur.label}`}
-                            sublabel={cur.symbol}
-                            selected={currency === cur.code}
-                            onPress={() => setCurrency(cur.code)}
                         />
                     ))}
                 </OptionCard>

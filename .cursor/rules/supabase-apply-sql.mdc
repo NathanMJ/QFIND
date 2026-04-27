@@ -1,0 +1,16 @@
+---
+description: Toujours appliquer le SQL Supabase via MCP (pas seulement éditer les fichiers).
+alwaysApply: true
+---
+
+# Supabase : appliquer le SQL automatiquement
+
+Quand une tâche ajoute ou modifie du SQL pour la base (schéma, RLS, seeds, fonctions) :
+
+1. **Mettre à jour** le fichier source du projet (ex. `supabase/sql/qfind_init_eybv.sql` ou une migration locale si le dépôt en utilise).
+2. **Exécuter** le changement sur le projet Supabase connecté (réf. MCP `eybvjylqsiyvycaqkcqb`) **sans demander à l’utilisateur** de coller le script dans le dashboard :
+   - **DDL** (tables, index, policies, fonctions) : MCP `user-supabase` → `apply_migration` avec un `name` en snake_case et le `query` complet.
+   - **Requêtes ponctuelles / vérifs** : `execute_sql`.
+3. **Vérifier** avec une petite requête `execute_sql` (ex. `information_schema`, counts) que le résultat est celui attendu.
+
+Ne pas se contenter d’indiquer « exécuter le SQL dans le dashboard » : l’agent doit appliquer lui-même tant que le MCP Supabase est disponible.
